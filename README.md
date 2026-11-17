@@ -1,24 +1,19 @@
-# Task-Track
+# TaskTrack
 
-**Game Overview**
+**TaskTrack** is a Python-based desktop application developed for a Data Structures and Algorithms (DASTAL) project. It features two modes: **Academic Mode**, which helps students organize tasks and deadlines, and **Game Mode**, which allows users to manage their Honkai: Star Rail characters, builds, and teams.
 
-Welcome to a version of tetris that causes claustrophobia and solves it with bombs. This app is a Finals Project of the 2nd year in Angeles University Foundation under the course of Computer Engineering, Shaina Lauren A. Sicat for her Data Structure and Algorithm subject to be submitted to Sir Jeremy A. Tecson.
+Built using Python Tkinter, the application combines a simple graphical interface with practical applications of data structures and algorithms.
 
-____________________________________________________________________________________________________________________________________________________________________________________________________________
+### Features
+- **Academic Mode:** Manage academic tasks, priorities, and deadlines.
+- **Game Mode:** Manage owned characters, customize builds, and create teams.
+- **Local Storage:** Save and manage information using JSON files.
+- **Interactive GUI:** Navigate between both modes through one desktop application.
 
-**How-to-Play**
+### Technologies
+- Python
+- Tkinter
+- JSON
+- Pillow (PIL)
 
-+ Left Arrow – Move left
-+ Right Arrow – Move right
-+ Up Arrow – Rotate piece
-+ Down Arrow – Accelerate the drop
-
-To balance the increased difficulty, players have a chance to receive bomb blocks:
-
-+ 20% chance during normal gameplay
-+ Increased to 45% chance when the columns are closed
-
-Bombs clear a 3×3 area, helping players reduce pressure, create space, and complete rows more effectively.
-___________________________________________________________________________________________________________
-
-**Goodluck and bomb's away player!**
+*Developed as a Data Structures and Algorithms academic final project.*
