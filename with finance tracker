@@ -1,0 +1,96 @@
+import json
+import os
+import shutil
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+
+# Pillow is optional. TaskTrack still works without it.
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# OCR is optional. Install pytesseract and the Tesseract OCR application.
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    OCR_AVAILABLE = False
+
+
+# ============================================================
+# TASKTRACK - THEME AND FILE LOCATIONS
+# ============================================================
+
+BG = "#17151D"
+SIDEBAR = "#211D29"
+CARD = "#30283A"
+ACCENT = "#88739E"
+SELECTED = "#665477"
+HIGHLIGHT = "#C4B8D0"
+TEXT = "#E5E0EA"
+MUTED = "#A99FB5"
+BORDER = "#51465C"
+
+# Six application-wide color themes. These are interface color palettes,
+# not character artwork or copied game UI assets.
+THEMES = {
+    "Blade": {"BG": "#101722", "SIDEBAR": "#172333", "CARD": "#243449", "ACCENT": "#B83D4B", "SELECTED": "#354D6B", "HIGHLIGHT": "#E36A73", "TEXT": "#EAF0F7", "MUTED": "#AAB9CA", "BORDER": "#40536B"},
+    "Phainon": {"BG": "#19180F", "SIDEBAR": "#292719", "CARD": "#3A3824", "ACCENT": "#C5A33D", "SELECTED": "#6D6337", "HIGHLIGHT": "#F0D875", "TEXT": "#F5F1DF", "MUTED": "#C7C09A", "BORDER": "#687052"},
+    "Cyrene": {"BG": "#FFF5FA", "SIDEBAR": "#FCE8F2", "CARD": "#FFFFFF", "ACCENT": "#F2A9CC", "SELECTED": "#DCEFFA", "HIGHLIGHT": "#A9DDF2", "TEXT": "#493747", "MUTED": "#927F8E", "BORDER": "#EBC9DC"},
+    "Firefly": {"BG": "#101C1B", "SIDEBAR": "#172B28", "CARD": "#203A34", "ACCENT": "#62B89A", "SELECTED": "#347C68", "HIGHLIGHT": "#A9E6C9", "TEXT": "#E7F4ED", "MUTED": "#A8C8B8", "BORDER": "#3D695A"},
+    "Castorice": {"BG": "#191426", "SIDEBAR": "#261D38", "CARD": "#362A4D", "ACCENT": "#9B79C8", "SELECTED": "#654B8D", "HIGHLIGHT": "#D8C2F4", "TEXT": "#F2ECFA", "MUTED": "#BFB0D5", "BORDER": "#5E4C7B"},
+    "Acheron – Red Mode": {"BG": "#160E12", "SIDEBAR": "#241318", "CARD": "#351B23", "ACCENT": "#C23B50", "SELECTED": "#81283B", "HIGHLIGHT": "#F08A9B", "TEXT": "#F5E9EC", "MUTED": "#C4A3AA", "BORDER": "#66303D"}
+}
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ACADEMIC_FILE = os.path.join(BASE_DIR, "academic_data.json")
+FINANCE_FILE = os.path.join(BASE_DIR, "finance_data.json")
+SETTINGS_FILE = os.path.join(BASE_DIR, "tasktrack_settings.json")
+
+
+# ============================================================
+# BASIC JSON STORAGE
+# ============================================================
+
+def load_json(path, default_data):
+    """Load JSON data. Return default_data if the file does not exist."""
+    if not os.path.exists(path):
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, OSError):
+        messagebox.showwarning(
+            "Data file problem",
+            f"Could not read {os.path.basename(path)}. "
+            "The application will start with empty data."
+        )
+        return default_data
+
+
+def save_json(path, data):
+    """Save data as readable JSON."""
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4, ensure_ascii=False)
+        return True
+    except OSError as error:
+        messagebox.showerror("Save error", f"Could not save data:\n{error}")
+        return False
+
+
+# ============================================================
+# SIMPLE STACK FOR ACADEMIC UNDO
+# ============================================================
+
+class ActionStack:
+    """A small stack that stores previous academic task states."""
+
+    def __init__(self):
