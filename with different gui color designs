@@ -1,0 +1,1810 @@
+import json
+import os
+import shutil
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import date
+
+# Pillow is optional. TaskTrack still works without it.
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# OCR is optional. Install pytesseract and the Tesseract OCR application.
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    OCR_AVAILABLE = False
+
+
+# ============================================================
+# TASKTRACK - THEME AND FILE LOCATIONS
+# ============================================================
+
+BG = "#17151D"
+SIDEBAR = "#211D29"
+CARD = "#30283A"
+ACCENT = "#88739E"
+SELECTED = "#665477"
+HIGHLIGHT = "#C4B8D0"
+TEXT = "#E5E0EA"
+MUTED = "#A99FB5"
+BORDER = "#51465C"
+
+# Seven application-wide color themes. These are interface color palettes,
+# not character artwork or copied game UI assets.
+THEMES = {
+    "Blade": {"BG": "#171216", "SIDEBAR": "#241820", "CARD": "#34232B", "ACCENT": "#9B4657", "SELECTED": "#713344", "HIGHLIGHT": "#D9A7B0", "TEXT": "#F0E5E8", "MUTED": "#B99DA5", "BORDER": "#62404A"},
+    "Phainon": {"BG": "#17140F", "SIDEBAR": "#292116", "CARD": "#3A2E1D", "ACCENT": "#B7833E", "SELECTED": "#805B2D", "HIGHLIGHT": "#F0CC87", "TEXT": "#F4EBDD", "MUTED": "#C4B18F", "BORDER": "#6C5434"},
+    "Cyrene": {"BG": "#111A27", "SIDEBAR": "#1A293B", "CARD": "#26394F", "ACCENT": "#82AFCB", "SELECTED": "#486F91", "HIGHLIGHT": "#C5E3F2", "TEXT": "#EAF3F8", "MUTED": "#A8BDCC", "BORDER": "#405A70"},
+    "Firefly": {"BG": "#101C1B", "SIDEBAR": "#172B28", "CARD": "#203A34", "ACCENT": "#62B89A", "SELECTED": "#347C68", "HIGHLIGHT": "#A9E6C9", "TEXT": "#E7F4ED", "MUTED": "#A8C8B8", "BORDER": "#3D695A"},
+    "Feixiao": {"BG": "#111B1B", "SIDEBAR": "#1A2A29", "CARD": "#263B38", "ACCENT": "#76A99A", "SELECTED": "#426F64", "HIGHLIGHT": "#C1E0D4", "TEXT": "#EAF2EE", "MUTED": "#A9C0B7", "BORDER": "#45645B"},
+    "Castorice": {"BG": "#191522", "SIDEBAR": "#251D32", "CARD": "#352944", "ACCENT": "#A58AC8", "SELECTED": "#71588F", "HIGHLIGHT": "#D9C6F0", "TEXT": "#F0EAF7", "MUTED": "#BBAECC", "BORDER": "#5A496E"},
+    "Acheron – Red Mode": {"BG": "#160E12", "SIDEBAR": "#241318", "CARD": "#351B23", "ACCENT": "#C23B50", "SELECTED": "#81283B", "HIGHLIGHT": "#F08A9B", "TEXT": "#F5E9EC", "MUTED": "#C4A3AA", "BORDER": "#66303D"}
+}
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ACADEMIC_FILE = os.path.join(BASE_DIR, "academic_data.json")
+GAME_FILE = os.path.join(BASE_DIR, "game_data.json")
+CHARACTER_IMAGE_DIR = os.path.join(BASE_DIR, "assets", "characters")
+SCREENSHOT_DIR = os.path.join(BASE_DIR, "assets", "screenshots")
+SETTINGS_FILE = os.path.join(BASE_DIR, "tasktrack_settings.json")
+
+
+# ============================================================
+# BASIC JSON STORAGE
+# ============================================================
+
+def load_json(path, default_data):
+    """Load JSON data. Return default_data if the file does not exist."""
+    if not os.path.exists(path):
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, OSError):
+        messagebox.showwarning(
+            "Data file problem",
+            f"Could not read {os.path.basename(path)}. "
+            "The application will start with empty data."
+        )
+        return default_data
+
+
+def save_json(path, data):
+    """Save data as readable JSON."""
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4, ensure_ascii=False)
+        return True
+    except OSError as error:
+        messagebox.showerror("Save error", f"Could not save data:\n{error}")
+        return False
+
+
+# ============================================================
+# SIMPLE STACK FOR ACADEMIC UNDO
+# ============================================================
+
+class ActionStack:
+    """A small stack that stores previous academic task states."""
+
+    def __init__(self):
+        self.items = []
+
+    def push(self, value):
+        self.items.append(value)
+
+    def pop(self):
+        if self.is_empty():
+            return None
+        return self.items.pop()
+
+    def is_empty(self):
+        return len(self.items) == 0
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+class TaskTrack:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TaskTrack")
+        self.root.geometry("1180x760")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=BG)
+
+        saved_settings = load_json(SETTINGS_FILE, {"theme": "Acheron – Red Mode"})
+        self.current_theme = saved_settings.get("theme", "Acheron – Red Mode")
+        if self.current_theme not in THEMES:
+            self.current_theme = "Acheron – Red Mode"
+        self.apply_palette(self.current_theme, refresh=False)
+        self.root.configure(bg=BG)
+
+        os.makedirs(CHARACTER_IMAGE_DIR, exist_ok=True)
+        os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+
+        self.academic_data = load_json(
+            ACADEMIC_FILE,
+            {"tasks": []}
+        )
+        self.game_data = load_json(
+            GAME_FILE,
+            {"characters": [], "teams": []}
+        )
+
+        # Keep compatibility if an older JSON file is missing a key.
+        self.academic_data.setdefault("tasks", [])
+        self.game_data.setdefault("characters", [])
+        self.game_data.setdefault("teams", [])
+
+        self.undo_stack = ActionStack()
+        self.current_mode = None
+        self.current_page = None
+        self.selected_character_id = None
+        self.character_photo = None
+
+        self.setup_styles()
+        self.show_landing_page()
+
+    def apply_palette(self, theme_name, refresh=True):
+        """Apply one theme to every screen in the application."""
+        global BG, SIDEBAR, CARD, ACCENT, SELECTED, HIGHLIGHT, TEXT, MUTED, BORDER
+        if theme_name not in THEMES:
+            return
+        self.current_theme = theme_name
+        palette = THEMES[theme_name]
+        BG = palette["BG"]
+        SIDEBAR = palette["SIDEBAR"]
+        CARD = palette["CARD"]
+        ACCENT = palette["ACCENT"]
+        SELECTED = palette["SELECTED"]
+        HIGHLIGHT = palette["HIGHLIGHT"]
+        TEXT = palette["TEXT"]
+        MUTED = palette["MUTED"]
+        BORDER = palette["BORDER"]
+        self.root.configure(bg=BG)
+        if refresh:
+            save_json(SETTINGS_FILE, {"theme": theme_name})
+            self.setup_styles()
+            page = self.current_page
+            if page == "landing" or self.current_mode is None:
+                self.show_landing_page()
+            elif self.current_mode == "academic":
+                if page == "academic_list":
+                    self.show_all_tasks()
+                else:
+                    self.show_academic_dashboard()
+            elif self.current_mode == "game":
+                game_pages = {
+                    "game_dashboard": self.show_game_dashboard,
+                    "character_collection": self.show_character_collection,
+                    "build_workshop": self.show_build_workshop,
+                    "team_builder": self.show_team_builder,
+                    "build_comparison": self.show_build_comparison,
+                }
+                game_pages.get(page, self.show_game_dashboard)()
+
+    def open_theme_settings(self):
+        """Show a theme picker that applies changes immediately."""
+        window = tk.Toplevel(self.root)
+        window.title("TaskTrack Appearance")
+        window.geometry("540x590")
+        window.resizable(False, False)
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(window, text="Choose Your Theme", bg=BG, fg=TEXT,
+                 font=("Arial", 19, "bold")).pack(anchor="w", padx=24, pady=(22, 4))
+        tk.Label(window, text="Your selection changes both Academic Mode and Game Mode.",
+                 bg=BG, fg=MUTED, font=("Arial", 9)).pack(anchor="w", padx=24, pady=(0, 16))
+
+        grid = tk.Frame(window, bg=BG)
+        grid.pack(fill="both", expand=True, padx=18, pady=4)
+        for index, (name, colors) in enumerate(THEMES.items()):
+            row, col = divmod(index, 2)
+            swatch = tk.Frame(grid, bg=colors["CARD"], highlightthickness=1,
+                              highlightbackground=colors["BORDER"], padx=12, pady=10)
+            swatch.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            tk.Label(swatch, text=name, bg=colors["CARD"], fg=colors["TEXT"],
+                     font=("Arial", 10, "bold")).pack(anchor="w")
+            strip = tk.Frame(swatch, bg=colors["CARD"])
+            strip.pack(anchor="w", pady=8)
+            for color in (colors["BG"], colors["SIDEBAR"], colors["ACCENT"], colors["HIGHLIGHT"]):
+                tk.Frame(strip, bg=color, width=30, height=18).pack(side="left", padx=(0, 5))
+            tk.Button(swatch, text="Apply Theme", command=lambda n=name: self.apply_palette(n),
+                      bg=colors["ACCENT"], fg=colors["TEXT"], activebackground=colors["SELECTED"],
+                      activeforeground=colors["TEXT"], relief="flat", bd=0, padx=10, pady=6,
+                      cursor="hand2").pack(anchor="w")
+        for col in range(2):
+            grid.grid_columnconfigure(col, weight=1)
+        self.make_button(window, "Close", window.destroy).pack(pady=(8, 18))
+
+    # --------------------------------------------------------
+    # STYLES AND REUSABLE UI HELPERS
+    # --------------------------------------------------------
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        style.configure(
+            "Treeview",
+            background=CARD,
+            foreground=TEXT,
+            fieldbackground=CARD,
+            rowheight=32,
+            borderwidth=0,
+            font=("Arial", 10)
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=SIDEBAR,
+            foreground=HIGHLIGHT,
+            font=("Arial", 10, "bold"),
+            relief="flat"
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", SELECTED)],
+            foreground=[("selected", TEXT)]
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=CARD,
+            background=CARD,
+            foreground=TEXT,
+            arrowcolor=TEXT
+        )
+
+    def clear_window(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def clear_content(self):
+        for widget in self.content.winfo_children():
+            widget.destroy()
+
+    def make_button(self, parent, text, command, primary=False, **kwargs):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=ACCENT if primary else CARD,
+            fg="white" if primary else TEXT,
+            activebackground=SELECTED,
+            activeforeground="white",
+            font=("Arial", 10, "bold" if primary else "normal"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            cursor="hand2",
+            **kwargs
+        )
+
+    def page_header(self, title, subtitle=""):
+        header = tk.Frame(self.content, bg=BG)
+        header.pack(fill="x", padx=32, pady=(28, 20))
+
+        tk.Label(
+            header,
+            text=title,
+            bg=BG,
+            fg=TEXT,
+            font=("Arial", 23, "bold")
+        ).pack(anchor="w")
+
+        if subtitle:
+            tk.Label(
+                header,
+                text=subtitle,
+                bg=BG,
+                fg=MUTED,
+                font=("Arial", 10)
+            ).pack(anchor="w", pady=(5, 0))
+
+    def make_card(self, parent, title, value, note=""):
+        card = tk.Frame(parent, bg=CARD, padx=18, pady=16)
+        tk.Label(
+            card, text=title, bg=CARD, fg=MUTED,
+            font=("Arial", 9)
+        ).pack(anchor="w")
+        tk.Label(
+            card, text=str(value), bg=CARD, fg=HIGHLIGHT,
+            font=("Arial", 24, "bold")
+        ).pack(anchor="w", pady=(5, 0))
+        if note:
+            tk.Label(
+                card, text=note, bg=CARD, fg=MUTED,
+                font=("Arial", 8)
+            ).pack(anchor="w", pady=(3, 0))
+        return card
+
+    def make_page_title(self, parent, title, subtitle=""):
+        tk.Label(
+            parent, text=title, bg=BG, fg=TEXT,
+            font=("Arial", 21, "bold")
+        ).pack(anchor="w", pady=(0, 5))
+        if subtitle:
+            tk.Label(
+                parent, text=subtitle, bg=BG, fg=MUTED,
+                font=("Arial", 10)
+            ).pack(anchor="w", pady=(0, 18))
+
+    # --------------------------------------------------------
+    # LANDING PAGE - ONLY TWO OPTIONS
+    # --------------------------------------------------------
+
+    def show_landing_page(self):
+        self.current_mode = None
+        self.current_page = "landing"
+        self.clear_window()
+
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True)
+
+        center = tk.Frame(outer, bg=BG)
+        center.place(relx=0.5, rely=0.48, anchor="center")
+
+        tk.Label(
+            center,
+            text="TASKTRACK",
+            bg=BG,
+            fg=HIGHLIGHT,
+            font=("Arial", 30, "bold")
+        ).pack()
+
+        tk.Label(
+            center,
+            text="YOUR SPACE. YOUR PROGRESS.",
+            bg=BG,
+            fg=MUTED,
+            font=("Arial", 9)
+        ).pack(pady=(5, 12))
+
+        tk.Label(
+            center,
+            text="Choose your workspace",
+            bg=BG,
+            fg=TEXT,
+            font=("Arial", 13)
+        ).pack(pady=(0, 28))
+
+        choices = tk.Frame(center, bg=BG)
+        choices.pack()
+
+        self.create_mode_card(
+            choices,
+            "ACADEMIC MODE",
+            "Organize subjects, assignments,\\nand academic deadlines.",
+            "🎓",
+            self.show_academic_dashboard
+        )
+        self.create_mode_card(
+            choices,
+            "GAME MODE",
+            "Manage characters, equipment,\\nbuilds, and teams.",
+            "✦",
+            self.show_game_dashboard
+        )
+
+        self.make_button(center, "⚙ Appearance / Themes", self.open_theme_settings).pack(pady=(18, 0))
+
+        tk.Label(
+            center,
+            text="TaskTrack • Academic and personal game management",
+            bg=BG,
+            fg=MUTED,
+            font=("Arial", 8)
+        ).pack(pady=(28, 0))
+
+    def create_mode_card(self, parent, title, description, symbol, command):
+        card = tk.Frame(
+            parent, bg=CARD, width=280, height=245,
+            highlightthickness=1, highlightbackground=BORDER
+        )
+        card.pack(side="left", padx=12)
+        card.pack_propagate(False)
+
+        tk.Label(
+            card, text=symbol, bg=CARD, fg=HIGHLIGHT,
+            font=("Arial", 34)
+        ).pack(pady=(25, 8))
+
+        tk.Label(
+            card, text=title, bg=CARD, fg=TEXT,
+            font=("Arial", 15, "bold")
+        ).pack()
+
+        tk.Label(
+            card, text=description, bg=CARD, fg=MUTED,
+            font=("Arial", 9), justify="center"
+        ).pack(pady=12)
+
+        self.make_button(
+            card, "ENTER", command, primary=True
+        ).pack(pady=5)
+
+    # --------------------------------------------------------
+    # MODE LAYOUTS AND NAVIGATION
+    # --------------------------------------------------------
+
+    def build_mode_layout(self, mode, navigation):
+        self.current_mode = mode
+        self.clear_window()
+
+        self.sidebar = tk.Frame(self.root, bg=SIDEBAR, width=225)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+
+        self.content = tk.Frame(self.root, bg=BG)
+        self.content.pack(side="right", fill="both", expand=True)
+
+        tk.Label(
+            self.sidebar,
+            text="TASKTRACK",
+            bg=SIDEBAR,
+            fg=HIGHLIGHT,
+            font=("Arial", 18, "bold")
+        ).pack(pady=(25, 3))
+
+        mode_label = "ACADEMIC MODE" if mode == "academic" else "GAME MODE"
+        tk.Label(
+            self.sidebar,
+            text=mode_label,
+            bg=SIDEBAR,
+            fg=MUTED,
+            font=("Arial", 9, "bold")
+        ).pack(pady=(0, 25))
+
+        self.nav_buttons = {}
+        for label, command in navigation:
+            button = tk.Button(
+                self.sidebar,
+                text=label,
+                command=command,
+                bg=SIDEBAR,
+                fg=TEXT,
+                activebackground=SELECTED,
+                activeforeground="white",
+                font=("Arial", 10),
+                relief="flat",
+                anchor="w",
+                padx=20,
+                pady=11,
+                cursor="hand2"
+            )
+            button.pack(fill="x", padx=9, pady=2)
+            self.nav_buttons[label] = button
+
+        self.make_button(self.sidebar, "⚙ Appearance / Themes", self.open_theme_settings).pack(
+            fill="x", padx=12, pady=(12, 4)
+        )
+        tk.Frame(self.sidebar, bg=SIDEBAR).pack(fill="both", expand=True)
+
+        self.make_button(
+            self.sidebar,
+            "← Back to Main Menu",
+            self.show_landing_page
+        ).pack(fill="x", padx=12, pady=18)
+
+    def set_active_nav(self, selected):
+        for label, button in self.nav_buttons.items():
+            button.configure(
+                bg=SELECTED if label == selected else SIDEBAR,
+                fg="white" if label == selected else TEXT
+            )
+
+    # --------------------------------------------------------
+    # ACADEMIC MODE
+    # --------------------------------------------------------
+
+    def academic_navigation(self):
+        return [
+            ("Dashboard", self.show_academic_dashboard),
+            ("My Tasks", self.show_all_tasks),
+            ("Major Subjects", lambda: self.show_category_tasks("Major")),
+            ("Minor Subjects", lambda: self.show_category_tasks("Minor")),
+            ("Upcoming Deadlines", self.show_upcoming_tasks),
+            ("Completed Tasks", self.show_completed_tasks)
+        ]
+
+    def ensure_academic_layout(self):
+        if self.current_mode != "academic":
+            self.build_mode_layout("academic", self.academic_navigation())
+
+    def save_academic(self):
+        save_json(ACADEMIC_FILE, self.academic_data)
+
+    def push_undo_state(self):
+        # Store a copy so later edits do not change the saved undo state.
+        self.undo_stack.push(json.dumps(self.academic_data))
+
+    def undo_academic_action(self):
+        previous = self.undo_stack.pop()
+        if previous is None:
+            messagebox.showinfo("Undo", "There are no actions to undo.")
+            return
+
+        self.academic_data = json.loads(previous)
+        self.save_academic()
+        self.show_academic_dashboard()
+        messagebox.showinfo("Undo", "The previous academic task state was restored.")
+
+    def show_academic_dashboard(self):
+        self.ensure_academic_layout()
+        self.current_page = "academic_dashboard"
+        self.clear_content()
+        self.set_active_nav("Dashboard")
+
+        tasks = self.academic_data["tasks"]
+        total = len(tasks)
+        completed = sum(1 for item in tasks if item.get("status") == "Completed")
+        pending = total - completed
+        major = sum(1 for item in tasks if item.get("category") == "Major")
+        minor = sum(1 for item in tasks if item.get("category") == "Minor")
+
+        self.page_header(
+            "Academic Dashboard",
+            "Keep track of your subjects, assignments, and deadlines."
+        )
+
+        stats = tk.Frame(self.content, bg=BG)
+        stats.pack(fill="x", padx=32)
+
+        cards = [
+            ("Total Tasks", total),
+            ("Pending", pending),
+            ("Completed", completed),
+            ("Major / Minor", f"{major} / {minor}")
+        ]
+        for title, value in cards:
+            self.make_card(stats, title, value).pack(
+                side="left", fill="both", expand=True, padx=(0, 10)
+            )
+
+        section = tk.Frame(self.content, bg=BG)
+        section.pack(fill="both", expand=True, padx=32, pady=25)
+
+        tk.Label(
+            section, text="Recent Tasks", bg=BG, fg=TEXT,
+            font=("Arial", 15, "bold")
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.create_task_table(section, tasks[:8])
+
+        actions = tk.Frame(section, bg=BG)
+        actions.pack(fill="x", pady=14)
+
+        self.make_button(
+            actions, "+ Add Task", self.add_task_dialog, primary=True
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            actions, "Undo Last Action", self.undo_academic_action
+        ).pack(side="right")
+
+    def create_task_table(self, parent, tasks, show_actions=True):
+        columns = ("title", "subject", "category", "due", "priority", "status")
+        table = ttk.Treeview(parent, columns=columns, show="headings")
+
+        headings = {
+            "title": "Task",
+            "subject": "Subject",
+            "category": "Category",
+            "due": "Due Date",
+            "priority": "Priority",
+            "status": "Status"
+        }
+        widths = {
+            "title": 190, "subject": 150, "category": 85,
+            "due": 105, "priority": 85, "status": 100
+        }
+
+        for column in columns:
+            table.heading(column, text=headings[column])
+            table.column(column, width=widths[column], minwidth=65)
+
+        for task in tasks:
+            table.insert(
+                "", "end", iid=str(task.get("id", id(task))),
+                values=(
+                    task.get("title", ""),
+                    task.get("subject", ""),
+                    task.get("category", ""),
+                    task.get("due", ""),
+                    task.get("priority", ""),
+                    task.get("status", "Pending")
+                )
+            )
+
+        table.pack(fill="both", expand=True)
+
+        if show_actions:
+            table.bind("<Double-1>", lambda event: self.edit_selected_task(table))
+        return table
+
+    def add_task_dialog(self, existing_task=None):
+        editing = existing_task is not None
+        window = tk.Toplevel(self.root)
+        window.title("Edit Task" if editing else "Add Task")
+        window.geometry("430x560")
+        window.configure(bg=BG)
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window,
+            text="Edit Task" if editing else "Add New Task",
+            bg=BG, fg=TEXT, font=("Arial", 18, "bold")
+        ).pack(pady=(22, 16))
+
+        fields = {}
+
+        def add_entry(label, key, initial=""):
+            tk.Label(
+                window, text=label, bg=BG, fg=TEXT,
+                font=("Arial", 9)
+            ).pack(anchor="w", padx=35)
+            entry = tk.Entry(
+                window, bg=CARD, fg=TEXT,
+                insertbackground=TEXT, relief="flat"
+            )
+            entry.pack(fill="x", padx=35, pady=(5, 12), ipady=7)
+            entry.insert(0, initial)
+            fields[key] = entry
+
+        add_entry("Task Title", "title", existing_task.get("title", "") if editing else "")
+        add_entry("Subject Name", "subject", existing_task.get("subject", "") if editing else "")
+
+        tk.Label(
+            window, text="Subject Category", bg=BG, fg=TEXT
+        ).pack(anchor="w", padx=35)
+        category = ttk.Combobox(
+            window, values=["Major", "Minor"], state="readonly"
+        )
+        category.set(existing_task.get("category", "Major") if editing else "Major")
+        category.pack(fill="x", padx=35, pady=(5, 12), ipady=4)
+
+        add_entry(
+            "Due Date (YYYY-MM-DD)", "due",
+            existing_task.get("due", "") if editing else ""
+        )
+
+        tk.Label(
+            window, text="Priority", bg=BG, fg=TEXT
+        ).pack(anchor="w", padx=35)
+        priority = ttk.Combobox(
+            window, values=["High", "Medium", "Low"], state="readonly"
+        )
+        priority.set(existing_task.get("priority", "Medium") if editing else "Medium")
+        priority.pack(fill="x", padx=35, pady=(5, 12), ipady=4)
+
+        def save_task():
+            title = fields["title"].get().strip()
+            subject = fields["subject"].get().strip()
+            due = fields["due"].get().strip()
+
+            if not title or not subject or not due:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a task title, subject, and due date.",
+                    parent=window
+                )
+                return
+
+            try:
+                date.fromisoformat(due)
+            except ValueError:
+                messagebox.showwarning(
+                    "Invalid Date",
+                    "Enter the date using YYYY-MM-DD.",
+                    parent=window
+                )
+                return
+
+            if editing:
+                self.push_undo_state()
+                existing_task.update({
+                    "title": title,
+                    "subject": subject,
+                    "category": category.get(),
+                    "due": due,
+                    "priority": priority.get()
+                })
+            else:
+                self.push_undo_state()
+                next_id = max(
+                    [item.get("id", 0) for item in self.academic_data["tasks"]] + [0]
+                ) + 1
+                self.academic_data["tasks"].append({
+                    "id": next_id,
+                    "title": title,
+                    "subject": subject,
+                    "category": category.get(),
+                    "due": due,
+                    "priority": priority.get(),
+                    "status": "Pending"
+                })
+
+            self.save_academic()
+            window.destroy()
+            self.show_academic_dashboard()
+
+        self.make_button(
+            window, "Save Task", save_task, primary=True
+        ).pack(pady=16)
+
+    def selected_task(self, table):
+        selection = table.selection()
+        if not selection:
+            messagebox.showinfo("Select Task", "Please select a task first.")
+            return None
+        task_id = int(selection[0])
+        for task in self.academic_data["tasks"]:
+            if task.get("id") == task_id:
+                return task
+        return None
+
+    def edit_selected_task(self, table):
+        task = self.selected_task(table)
+        if task:
+            self.add_task_dialog(task)
+
+    def delete_selected_task(self, table):
+        task = self.selected_task(table)
+        if not task:
+            return
+        if messagebox.askyesno("Delete Task", f"Delete '{task['title']}'?"):
+            self.push_undo_state()
+            self.academic_data["tasks"].remove(task)
+            self.save_academic()
+            self.show_all_tasks()
+
+    def complete_selected_task(self, table):
+        task = self.selected_task(table)
+        if not task:
+            return
+        if task.get("status") == "Completed":
+            messagebox.showinfo("Task Status", "This task is already completed.")
+            return
+        self.push_undo_state()
+        task["status"] = "Completed"
+        self.save_academic()
+        self.show_all_tasks()
+
+    def linear_search_tasks(self, query, category=None):
+        """Linear search through task titles and subject names."""
+        matches = []
+        query = query.lower().strip()
+        for task in self.academic_data["tasks"]:
+            if category and task.get("category") != category:
+                continue
+            searchable = (
+                task.get("title", "").lower()
+                + " "
+                + task.get("subject", "").lower()
+            )
+            if query in searchable:
+                matches.append(task)
+        return matches
+
+    def insertion_sort_tasks(self, tasks):
+        """Insertion sort by due date, earliest first."""
+        result = tasks[:]
+        for index in range(1, len(result)):
+            current = result[index]
+            position = index - 1
+            while position >= 0 and result[position].get("due", "") > current.get("due", ""):
+                result[position + 1] = result[position]
+                position -= 1
+            result[position + 1] = current
+        return result
+
+    def show_task_list(self, title, subtitle, tasks, active_nav, allow_search=True):
+        self.ensure_academic_layout()
+        self.current_page = "academic_list"
+        self.clear_content()
+        self.set_active_nav(active_nav)
+        self.page_header(title, subtitle)
+
+        toolbar = tk.Frame(self.content, bg=BG)
+        toolbar.pack(fill="x", padx=32, pady=(0, 12))
+
+        search_var = tk.StringVar()
+        if allow_search:
+            search_entry = tk.Entry(
+                toolbar, textvariable=search_var,
+                bg=CARD, fg=TEXT, insertbackground=TEXT,
+                relief="flat", font=("Arial", 10)
+            )
+            search_entry.pack(side="left", fill="x", expand=True, ipady=9)
+
+        table_area = tk.Frame(self.content, bg=BG)
+        table_area.pack(fill="both", expand=True, padx=32, pady=(0, 10))
+
+        table = self.create_task_table(table_area, tasks)
+
+        def refresh_results(*_):
+            query = search_var.get()
+            if query:
+                results = self.linear_search_tasks(query)
+            else:
+                results = tasks
+
+            for row in table.get_children():
+                table.delete(row)
+
+            for task in results:
+                table.insert(
+                    "", "end", iid=str(task.get("id", id(task))),
+                    values=(
+                        task.get("title", ""),
+                        task.get("subject", ""),
+                        task.get("category", ""),
+                        task.get("due", ""),
+                        task.get("priority", ""),
+                        task.get("status", "Pending")
+                    )
+                )
+
+        if allow_search:
+            search_var.trace_add("write", refresh_results)
+
+        buttons = tk.Frame(self.content, bg=BG)
+        buttons.pack(fill="x", padx=32, pady=(0, 22))
+
+        self.make_button(
+            buttons, "+ Add Task", self.add_task_dialog, primary=True
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Edit Selected", lambda: self.edit_selected_task(table)
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Mark Completed", lambda: self.complete_selected_task(table)
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Delete Selected", lambda: self.delete_selected_task(table)
+        ).pack(side="right")
+
+    def show_all_tasks(self):
+        tasks = self.insertion_sort_tasks(self.academic_data["tasks"])
+        self.show_task_list(
+            "My Tasks", "Search, edit, complete, or delete academic tasks.",
+            tasks, "My Tasks"
+        )
+
+    def show_category_tasks(self, category):
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("category") == category
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        nav = "Major Subjects" if category == "Major" else "Minor Subjects"
+        self.show_task_list(
+            f"{category} Subjects",
+            f"Tasks categorized under {category.lower()} subjects.",
+            tasks, nav
+        )
+
+    def show_upcoming_tasks(self):
+        today = date.today().isoformat()
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("status") == "Pending" and task.get("due", "") >= today
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        self.show_task_list(
+            "Upcoming Deadlines",
+            "Pending tasks with deadlines today or later.",
+            tasks, "Upcoming Deadlines"
+        )
+
+    def show_completed_tasks(self):
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("status") == "Completed"
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        self.show_task_list(
+            "Completed Tasks",
+            "Review your finished academic tasks.",
+            tasks, "Completed Tasks"
+        )
+
+    # --------------------------------------------------------
+    # GAME MODE
+    # --------------------------------------------------------
+
+    def game_navigation(self):
+        return [
+            ("Dashboard", self.show_game_dashboard),
+            ("Character Collection", self.show_character_collection),
+            ("Build Workshop", self.show_build_workshop),
+            ("Team Builder", self.show_team_builder),
+            ("Build Comparison", self.show_build_comparison)
+        ]
+
+    def ensure_game_layout(self):
+        if self.current_mode != "game":
+            self.build_mode_layout("game", self.game_navigation())
+
+    def save_game(self):
+        save_json(GAME_FILE, self.game_data)
+
+    def show_game_dashboard(self):
+        self.ensure_game_layout()
+        self.current_page = "game_dashboard"
+        self.clear_content()
+        self.set_active_nav("Dashboard")
+
+        characters = self.game_data["characters"]
+        teams = self.game_data["teams"]
+        build_count = sum(
+            1 for character in characters if character.get("build")
+        )
+
+        self.page_header(
+            "Game Mode",
+            "Your Honkai: Star Rail character and team workspace."
+        )
+
+        stats = tk.Frame(self.content, bg=BG)
+        stats.pack(fill="x", padx=32)
+
+        self.make_card(stats, "Owned Characters", len(characters)).pack(
+            side="left", fill="both", expand=True, padx=(0, 10)
+        )
+        self.make_card(stats, "Saved Builds", build_count).pack(
+            side="left", fill="both", expand=True, padx=(0, 10)
+        )
+        self.make_card(stats, "Saved Teams", len(teams)).pack(
+            side="left", fill="both", expand=True
+        )
+
+        welcome = tk.Frame(self.content, bg=CARD, padx=22, pady=22)
+        welcome.pack(fill="x", padx=32, pady=28)
+
+        tk.Label(
+            welcome, text="Character Workshop",
+            bg=CARD, fg=HIGHLIGHT, font=("Arial", 17, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            welcome,
+            text="Add characters you own, record their builds, and organize teams.",
+            bg=CARD, fg=MUTED, font=("Arial", 10)
+        ).pack(anchor="w", pady=(7, 15))
+
+        self.make_button(
+            welcome, "Open Character Collection",
+            self.show_character_collection, primary=True
+        ).pack(anchor="w")
+
+    def show_character_collection(self):
+        self.ensure_game_layout()
+        self.current_page = "character_collection"
+        self.clear_content()
+        self.set_active_nav("Character Collection")
+        self.page_header(
+            "Character Collection",
+            "Manage the characters you have added to your collection."
+        )
+
+        toolbar = tk.Frame(self.content, bg=BG)
+        toolbar.pack(fill="x", padx=32, pady=(0, 12))
+
+        search_var = tk.StringVar()
+        search = tk.Entry(
+            toolbar, textvariable=search_var,
+            bg=CARD, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("Arial", 10)
+        )
+        search.pack(side="left", fill="x", expand=True, ipady=9)
+
+        table_area = tk.Frame(self.content, bg=BG)
+        table_area.pack(fill="both", expand=True, padx=32)
+
+        columns = ("name", "rarity", "element", "path", "level", "eidolon")
+        table = ttk.Treeview(table_area, columns=columns, show="headings")
+        labels = {
+            "name": "Character", "rarity": "Rarity",
+            "element": "Element", "path": "Path",
+            "level": "Level", "eidolon": "Eidolon"
+        }
+        for column in columns:
+            table.heading(column, text=labels[column])
+            table.column(column, width=120)
+        table.column("name", width=190)
+        table.pack(fill="both", expand=True)
+
+        def populate(*_):
+            for row in table.get_children():
+                table.delete(row)
+            query = search_var.get().lower().strip()
+            # Linear search through the owned character list.
+            for character in self.game_data["characters"]:
+                searchable = (
+                    character.get("name", "") + " "
+                    + character.get("element", "") + " "
+                    + character.get("path", "")
+                ).lower()
+                if query and query not in searchable:
+                    continue
+                table.insert(
+                    "", "end", iid=str(character["id"]),
+                    values=(
+                        character.get("name", ""),
+                        character.get("rarity", ""),
+                        character.get("element", ""),
+                        character.get("path", ""),
+                        character.get("level", ""),
+                        f"E{character.get('eidolon', 0)}"
+                    )
+                )
+
+        search_var.trace_add("write", populate)
+        populate()
+
+        def selected_character():
+            selection = table.selection()
+            if not selection:
+                messagebox.showinfo("Select Character", "Please select a character.")
+                return None
+            selected_id = int(selection[0])
+            for character in self.game_data["characters"]:
+                if character["id"] == selected_id:
+                    return character
+            return None
+
+        actions = tk.Frame(self.content, bg=BG)
+        actions.pack(fill="x", padx=32, pady=18)
+
+        self.make_button(
+            actions, "+ Add Character", self.add_character_dialog, primary=True
+        ).pack(side="right", padx=(8, 0))
+
+        self.make_button(
+            actions, "Open Build",
+            lambda: self.open_selected_build(selected_character())
+        ).pack(side="right", padx=(8, 0))
+
+        self.make_button(
+            actions, "Edit",
+            lambda: self.add_character_dialog(selected_character())
+        ).pack(side="right", padx=(8, 0))
+
+        self.make_button(
+            actions, "Delete",
+            lambda: self.delete_character(selected_character())
+        ).pack(side="right")
+
+    def add_character_dialog(self, existing=None):
+        """Import a character from multiple HSR screenshots using OCR.
+
+        OCR fills what it can recognize. The user reviews the result before saving,
+        because OCR cannot reliably identify every icon, star rating, or number.
+        """
+        editing = existing is not None
+        window = tk.Toplevel(self.root)
+        window.title("Import Character from Screenshots")
+        window.geometry("680x760")
+        window.minsize(620, 650)
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        outer = tk.Frame(window, bg=BG)
+        outer.pack(fill="both", expand=True, padx=24, pady=18)
+
+        tk.Label(
+            outer, text="Import Character" if not editing else "Update Character",
+            bg=BG, fg=TEXT, font=("Arial", 19, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            outer,
+            text="Upload the character Details, Light Cone, and Relic screenshots.\n"
+                 "TaskTrack will scan visible text and fill in the fields it recognizes.",
+            bg=BG, fg=MUTED, font=("Arial", 9), justify="left"
+        ).pack(anchor="w", pady=(5, 14))
+
+        screenshot_paths = []
+        if editing:
+            screenshot_paths = list(existing.get("screenshots", []))
+
+        upload_status = tk.Label(
+            outer, text=f"{len(screenshot_paths)} screenshot(s) selected",
+            bg=CARD, fg=HIGHLIGHT, anchor="w", padx=12, pady=10
+        )
+        upload_status.pack(fill="x", pady=(0, 8))
+
+        extracted_text = tk.Text(
+            outer, height=6, wrap="word", bg=CARD, fg=TEXT,
+            insertbackground=TEXT, relief="flat", font=("Consolas", 8)
+        )
+        extracted_text.pack(fill="x", pady=(0, 12))
+        extracted_text.insert("1.0", "OCR results will appear here after scanning.")
+
+        fields_frame = tk.Frame(outer, bg=BG)
+        fields_frame.pack(fill="x")
+        fields = {}
+
+        def add_entry(label, key, value="", width=1):
+            box = tk.Frame(fields_frame, bg=BG)
+            box.pack(side="left", fill="x", expand=True, padx=(0, 10), pady=5)
+            tk.Label(box, text=label, bg=BG, fg=MUTED,
+                     font=("Arial", 9)).pack(anchor="w")
+            entry = tk.Entry(box, bg=CARD, fg=TEXT, insertbackground=TEXT,
+                             relief="flat", font=("Arial", 10))
+            entry.pack(fill="x", ipady=7, pady=(3, 0))
+            entry.insert(0, str(value))
+            fields[key] = entry
+
+        def add_combo(label, key, options, value):
+            box = tk.Frame(fields_frame, bg=BG)
+            box.pack(side="left", fill="x", expand=True, padx=(0, 10), pady=5)
+            tk.Label(box, text=label, bg=BG, fg=MUTED,
+                     font=("Arial", 9)).pack(anchor="w")
+            combo = ttk.Combobox(box, values=options, state="readonly")
+            combo.pack(fill="x", ipady=4, pady=(3, 0))
+            combo.set(value)
+            fields[key] = combo
+
+        old = existing or {}
+        row1 = tk.Frame(fields_frame, bg=BG)
+        row1.pack(fill="x")
+        fields_frame = row1
+        add_entry("Character Name", "name", old.get("name", ""))
+        add_combo("Rarity", "rarity", ["4-Star", "5-Star", "Unknown"], old.get("rarity", "Unknown"))
+
+        row2 = tk.Frame(outer, bg=BG)
+        row2.pack(fill="x")
+        saved_fields_frame = fields_frame
+        fields_frame = row2
+        add_combo("Element", "element",
+                  ["Physical", "Fire", "Ice", "Lightning", "Wind", "Quantum", "Imaginary", "Unknown"],
+                  old.get("element", "Unknown"))
+        add_combo("Path", "path",
+                  ["Destruction", "Hunt", "Erudition", "Harmony", "Nihility", "Preservation", "Abundance", "Remembrance", "Unknown"],
+                  old.get("path", "Unknown"))
+        add_entry("Level", "level", old.get("level", 1))
+        add_entry("Eidolon", "eidolon", old.get("eidolon", 0))
+
+        row3 = tk.Frame(outer, bg=BG)
+        row3.pack(fill="x", pady=(3, 0))
+        fields_frame = row3
+        for label, key in [("HP", "hp"), ("ATK", "atk"), ("DEF", "def"), ("SPD", "spd")]:
+            add_entry(label, key, old.get("build", {}).get(key, ""))
+
+        row4 = tk.Frame(outer, bg=BG)
+        row4.pack(fill="x")
+        fields_frame = row4
+        for label, key in [("CRIT Rate", "crit_rate"), ("CRIT DMG", "crit_dmg"),
+                           ("Effect Hit Rate", "effect_hit_rate"), ("Break Effect", "break_effect")]:
+            add_entry(label, key, old.get("build", {}).get(key, ""))
+
+        def normalize_text(text):
+            return re.sub(r"\s+", " ", text).strip()
+
+        def parse_value(text, label_patterns):
+            for pattern in label_patterns:
+                match = re.search(pattern + r"\s*[:：]?\s*([0-9]+(?:\.[0-9]+)?\s*%?)", text, re.I)
+                if match:
+                    return match.group(1).replace(" ", "")
+            return None
+
+        def extract_fields(all_text):
+            text = normalize_text(all_text)
+            result = {}
+            # Character name is often shown in the Details header or stat page.
+            name_match = re.search(r"(?:Character Details\s*)?([A-Z][A-Za-z' -]{2,30})\s+(?:Lv\.?|Level)", text)
+            if name_match:
+                candidate = name_match.group(1).strip()
+                if candidate.lower() not in {"character details", "light cone"}:
+                    result["name"] = candidate
+            for element in ["Physical", "Fire", "Ice", "Lightning", "Wind", "Quantum", "Imaginary"]:
+                if re.search(r"\b" + element + r"\b", text, re.I):
+                    result["element"] = element
+                    break
+            for path in ["Destruction", "Hunt", "Erudition", "Harmony", "Nihility", "Preservation", "Abundance", "Remembrance"]:
+                if re.search(r"\b" + path + r"\b", text, re.I):
+                    result["path"] = path
+                    break
+            level_match = re.search(r"(?:Lv\.?|Level)\s*(\d{1,2})\s*/?\s*80?", text, re.I)
+            if level_match:
+                result["level"] = level_match.group(1)
+            eidolon_match = re.search(r"(?:Eidolon|E)\s*([0-6])\b", text, re.I)
+            if eidolon_match:
+                result["eidolon"] = eidolon_match.group(1)
+            stat_patterns = {
+                "hp": [r"HP"], "atk": [r"ATK"], "def": [r"DEF"],
+                "spd": [r"SPD"], "crit_rate": [r"CRIT\s*Rate"],
+                "crit_dmg": [r"CRIT\s*DMG"],
+                "effect_hit_rate": [r"Effect\s*Hit\s*Rate"],
+                "break_effect": [r"Break\s*Effect"]
+            }
+            for key, patterns in stat_patterns.items():
+                value = parse_value(text, patterns)
+                if value:
+                    result[key] = value
+            return result
+
+        def run_ocr(path):
+            if not OCR_AVAILABLE:
+                raise RuntimeError("pytesseract is not installed. Install it with: pip install pytesseract")
+            if not PIL_AVAILABLE:
+                raise RuntimeError("Pillow is required for screenshot processing. Install it with: pip install pillow")
+            image = Image.open(path).convert("RGB")
+            # Try the original and quarter-turn rotations. This helps with sideways tablet photos.
+            candidates = [image, image.rotate(90, expand=True), image.rotate(270, expand=True)]
+            best_text = ""
+            for candidate in candidates:
+                candidate = candidate.copy()
+                candidate.thumbnail((2200, 2200))
+                try:
+                    text = pytesseract.image_to_string(candidate, config="--psm 6")
+                except Exception as error:
+                    raise RuntimeError(
+                        "Tesseract OCR could not run. Make sure the Tesseract application is installed.\n" + str(error)
+                    )
+                if len(text.strip()) > len(best_text.strip()):
+                    best_text = text
+            return best_text
+
+        def upload_and_scan():
+            nonlocal screenshot_paths
+            paths = filedialog.askopenfilenames(
+                parent=window,
+                title="Select HSR screenshots",
+                filetypes=[("Image files", "*.png *.jpg *.jpeg *.bmp *.webp"), ("All files", "*.*")]
+            )
+            if not paths:
+                return
+            screenshot_paths = list(paths)
+            upload_status.config(text=f"{len(screenshot_paths)} screenshot(s) selected")
+            scan_selected()
+
+        def scan_selected():
+            if not screenshot_paths:
+                messagebox.showinfo("No Screenshots", "Upload screenshots first.", parent=window)
+                return
+            if not OCR_AVAILABLE or not PIL_AVAILABLE:
+                extracted_text.delete("1.0", "end")
+                extracted_text.insert(
+                    "1.0",
+                    "Screenshots selected, but OCR is not ready. Install Pillow, pytesseract, "
+                    "and the Tesseract OCR application. Then click Scan Screenshots again."
+                )
+                return
+            scan_button.config(state="disabled", text="Scanning...")
+            window.update_idletasks()
+            text_parts = []
+            try:
+                for index, path in enumerate(screenshot_paths, start=1):
+                    text_parts.append(f"--- Screenshot {index}: {os.path.basename(path)} ---\n{run_ocr(path)}")
+                combined = "\n".join(text_parts)
+                extracted_text.delete("1.0", "end")
+                extracted_text.insert("1.0", combined if combined.strip() else "No readable text found.")
+                detected = extract_fields(combined)
+                for key, value in detected.items():
+                    if key in fields and value:
+                        fields[key].delete(0, "end")
+                        fields[key].insert(0, value)
+                messagebox.showinfo(
+                    "Scan Complete",
+                    f"Scanned {len(screenshot_paths)} screenshot(s).\n"
+                    "Please review the detected values before saving.", parent=window
+                )
+            except Exception as error:
+                messagebox.showerror("OCR Error", str(error), parent=window)
+            finally:
+                scan_button.config(state="normal", text="Scan Screenshots")
+
+        button_row = tk.Frame(outer, bg=BG)
+        button_row.pack(fill="x", pady=(0, 10))
+        self.make_button(button_row, "Upload Screenshots", upload_and_scan, primary=True).pack(side="left")
+        scan_button = self.make_button(button_row, "Scan Screenshots", scan_selected)
+        scan_button.pack(side="left", padx=8)
+
+        if not OCR_AVAILABLE or not PIL_AVAILABLE:
+            tk.Label(
+                outer,
+                text="OCR setup required: pip install pillow pytesseract, plus the Tesseract OCR desktop application.",
+                bg=BG, fg="#D8B77A", font=("Arial", 8), wraplength=620, justify="left"
+            ).pack(anchor="w", pady=(0, 8))
+
+        def save_character():
+            name = fields["name"].get().strip()
+            if not name:
+                messagebox.showwarning("Missing Name", "OCR did not find the character name. Please enter it.", parent=window)
+                return
+            try:
+                level = int(fields["level"].get())
+                eidolon = int(fields["eidolon"].get())
+            except ValueError:
+                messagebox.showwarning("Invalid Number", "Level and Eidolon must be whole numbers.", parent=window)
+                return
+            if not 1 <= level <= 80 or not 0 <= eidolon <= 6:
+                messagebox.showwarning("Invalid Values", "Level must be 1-80 and Eidolon must be 0-6.", parent=window)
+                return
+            for character in self.game_data["characters"]:
+                if character is not existing and character.get("name", "").lower() == name.lower():
+                    messagebox.showwarning("Duplicate Character", "That character is already in your collection.", parent=window)
+                    return
+
+            safe_name = "".join(c for c in name if c.isalnum() or c in (" ", "_", "-")).strip().replace(" ", "_")
+            saved_screenshots = []
+            for index, source in enumerate(screenshot_paths, start=1):
+                if not os.path.isfile(source):
+                    continue
+                extension = os.path.splitext(source)[1].lower() or ".png"
+                destination = os.path.join(SCREENSHOT_DIR, f"{safe_name}_{index}{extension}")
+                try:
+                    if os.path.abspath(source) != os.path.abspath(destination):
+                        shutil.copy2(source, destination)
+                    saved_screenshots.append(os.path.relpath(destination, BASE_DIR))
+                except OSError:
+                    continue
+
+            # Keep the portrait separate from full-screen game screenshots.
+            portrait = old.get("image", "")
+            build = {
+                key: fields[key].get().strip()
+                for key in ["hp", "atk", "def", "spd", "crit_rate", "crit_dmg", "effect_hit_rate", "break_effect"]
+            }
+            record = {
+                "name": name,
+                "rarity": fields["rarity"].get(),
+                "element": fields["element"].get(),
+                "path": fields["path"].get(),
+                "level": level,
+                "eidolon": eidolon,
+                "image": portrait,
+                "screenshots": saved_screenshots or old.get("screenshots", []),
+                "ocr_text": extracted_text.get("1.0", "end").strip(),
+                "build": build,
+                "equipment": old.get("equipment", {})
+            }
+            if editing:
+                existing.update(record)
+            else:
+                next_id = max([item.get("id", 0) for item in self.game_data["characters"]] + [0]) + 1
+                record["id"] = next_id
+                self.game_data["characters"].append(record)
+            self.save_game()
+            window.destroy()
+            self.show_character_collection()
+
+        self.make_button(outer, "Save Character", save_character, primary=True).pack(anchor="e", pady=(10, 0))
+
+    def delete_character(self, character):
+        if not character:
+            return
+        if not messagebox.askyesno(
+            "Delete Character",
+            f"Remove {character['name']} from your collection? "
+            "Any saved teams containing this character will also be updated."
+        ):
+            return
+
+        character_id = character["id"]
+        self.game_data["characters"].remove(character)
+
+        for team in self.game_data["teams"]:
+            team["character_ids"] = [
+                item_id for item_id in team.get("character_ids", [])
+                if item_id != character_id
+            ]
+
+        self.save_game()
+        self.show_character_collection()
+
+    def open_selected_build(self, character):
+        if not character:
+            return
+        self.selected_character_id = character["id"]
+        self.show_build_workshop()
+
+    def find_selected_character(self):
+        for character in self.game_data["characters"]:
+            if character["id"] == self.selected_character_id:
+                return character
+        return None
+
+    def show_build_workshop(self):
+        self.ensure_game_layout()
+        self.current_page = "build_workshop"
+        self.clear_content()
+        self.set_active_nav("Build Workshop")
+        self.page_header(
+            "Build Workshop",
+            "Select a character from your collection to view or update build information."
+        )
+
+        characters = self.game_data["characters"]
+        if not characters:
+            tk.Label(
+                self.content,
+                text="Your collection is empty. Add a character first.",
+                bg=BG, fg=MUTED, font=("Arial", 11)
+            ).pack(pady=35)
+            self.make_button(
+                self.content, "Go to Character Collection",
+                self.show_character_collection, primary=True
+            ).pack()
+            return
+
+        names = [character["name"] for character in characters]
+        selected = self.find_selected_character()
+        if selected is None:
+            selected = characters[0]
+            self.selected_character_id = selected["id"]
+
+        selector = ttk.Combobox(
+            self.content, values=names, state="readonly", width=35
+        )
+        selector.set(selected["name"])
+        selector.pack(anchor="w", padx=32, pady=(0, 15))
+
+        profile = tk.Frame(self.content, bg=CARD, padx=20, pady=18)
+        profile.pack(fill="x", padx=32)
+
+        portrait_area = tk.Frame(profile, bg=CARD, width=150, height=170)
+        portrait_area.pack(side="left", padx=(0, 22))
+        portrait_area.pack_propagate(False)
+
+        portrait_label = tk.Label(
+            portrait_area, text="CHARACTER\nPORTRAIT",
+            bg=SIDEBAR, fg=MUTED, justify="center"
+        )
+        portrait_label.pack(fill="both", expand=True)
+
+        def show_profile(character):
+            self.selected_character_id = character["id"]
+            portrait_label.config(image="", text="CHARACTER\nPORTRAIT")
+            self.character_photo = None
+
+            image_path = character.get("image", "")
+            if image_path:
+                full_path = os.path.join(BASE_DIR, image_path)
+                if PIL_AVAILABLE and os.path.isfile(full_path):
+                    try:
+                        image = Image.open(full_path)
+                        image.thumbnail((145, 165))
+                        self.character_photo = ImageTk.PhotoImage(image)
+                        portrait_label.config(image=self.character_photo, text="")
+                    except Exception:
+                        pass
+                elif not PIL_AVAILABLE:
+                    portrait_label.config(
+                        text="Install Pillow\nto display image"
+                    )
+
+            details = (
+                f"{character['name']}\n\n"
+                f"Rarity: {character['rarity']}\n"
+                f"Element: {character['element']}\n"
+                f"Path: {character['path']}\n"
+                f"Level: {character['level']}\n"
+                f"Eidolon: E{character['eidolon']}"
+            )
+            info_label.config(text=details)
+
+            build = character.get("build", {})
+            stats_label.config(
+                text=(
+                    f"HP: {build.get('hp', 'Not entered')}     "
+                    f"ATK: {build.get('atk', 'Not entered')}     "
+                    f"DEF: {build.get('def', 'Not entered')}     "
+                    f"SPD: {build.get('spd', 'Not entered')}\n"
+                    f"CRIT Rate: {build.get('crit_rate', 'Not entered')}     "
+                    f"CRIT DMG: {build.get('crit_dmg', 'Not entered')}"
+                )
+            )
+
+        info_label = tk.Label(
+            profile, text="", bg=CARD, fg=TEXT,
+            font=("Arial", 11), justify="left"
+        )
+        info_label.pack(side="left", anchor="n")
+
+        stats_box = tk.Frame(self.content, bg=CARD, padx=18, pady=15)
+        stats_box.pack(fill="x", padx=32, pady=15)
+
+        tk.Label(
+            stats_box, text="Recorded Combat Stats",
+            bg=CARD, fg=HIGHLIGHT, font=("Arial", 13, "bold")
+        ).pack(anchor="w", pady=(0, 10))
+
+        stats_label = tk.Label(
+            stats_box, text="", bg=CARD, fg=TEXT,
+            font=("Arial", 10), justify="left"
+        )
+        stats_label.pack(anchor="w")
+
+        def change_character(_event=None):
+            name = selector.get()
+            for item in characters:
+                if item["name"] == name:
+                    show_profile(item)
+                    break
+
+        selector.bind("<<ComboboxSelected>>", change_character)
+        show_profile(selected)
+
+        self.make_button(
+            self.content, "Edit Build Stats",
+            lambda: self.edit_build_dialog(self.find_selected_character()),
+            primary=True
+        ).pack(anchor="w", padx=32, pady=5)
+
+        if not PIL_AVAILABLE:
+            tk.Label(
+                self.content,
+                text="Optional: install Pillow with 'pip install pillow' to display uploaded portraits.",
+                bg=BG, fg=MUTED, font=("Arial", 8)
+            ).pack(anchor="w", padx=32, pady=5)
+
+    def edit_build_dialog(self, character):
+        if not character:
+            return
+
+        window = tk.Toplevel(self.root)
+        window.title("Edit Build Stats")
+        window.geometry("390x540")
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window, text=f"{character['name']} - Build Stats",
+            bg=BG, fg=TEXT, font=("Arial", 16, "bold")
+        ).pack(pady=20)
+
+        current = character.setdefault("build", {})
+        fields = {}
+        for label, key in [
+            ("HP", "hp"), ("ATK", "atk"), ("DEF", "def"), ("SPD", "spd"),
+            ("CRIT Rate", "crit_rate"), ("CRIT DMG", "crit_dmg"),
+            ("Effect Hit Rate", "effect_hit_rate"), ("Break Effect", "break_effect")
+        ]:
+            tk.Label(window, text=label, bg=BG, fg=TEXT).pack(
+                anchor="w", padx=35
+            )
+            entry = tk.Entry(
+                window, bg=CARD, fg=TEXT,
+                insertbackground=TEXT, relief="flat"
+            )
+            entry.pack(fill="x", padx=35, pady=(3, 8), ipady=5)
+            entry.insert(0, str(current.get(key, "")))
+            fields[key] = entry
+
+        def save_build():
+            self.selected_character_id = character["id"]
+            character["build"] = {
+                key: entry.get().strip()
+                for key, entry in fields.items()
+            }
+            self.save_game()
+            window.destroy()
+            self.show_build_workshop()
+
+        self.make_button(
+            window, "Save Build Stats", save_build, primary=True
+        ).pack(pady=15)
+
+    # --------------------------------------------------------
+    # TEAM BUILDER
+    # --------------------------------------------------------
+
+    def show_team_builder(self):
+        self.ensure_game_layout()
+        self.current_page = "team_builder"
+        self.clear_content()
+        self.set_active_nav("Team Builder")
+        self.page_header(
+            "Team Builder",
+            "Create a team using four different characters from your collection."
+        )
+
+        characters = self.game_data["characters"]
+        if len(characters) < 4:
+            tk.Label(
+                self.content,
+                text="Add at least four characters to your collection before creating a team.",
+                bg=BG, fg=MUTED, font=("Arial", 11)
+            ).pack(pady=30)
+            self.make_button(
+                self.content, "Open Character Collection",
+                self.show_character_collection, primary=True
+            ).pack()
+            return
+
+        form = tk.Frame(self.content, bg=CARD, padx=22, pady=20)
+        form.pack(fill="x", padx=32, pady=10)
+
+        tk.Label(form, text="Team Name", bg=CARD, fg=TEXT).pack(anchor="w")
+        team_name = tk.Entry(
+            form, bg=SIDEBAR, fg=TEXT, insertbackground=TEXT, relief="flat"
+        )
+        team_name.pack(fill="x", pady=(5, 15), ipady=7)
+
+        tk.Label(
+            form, text="Choose exactly four characters",
+            bg=CARD, fg=TEXT, font=("Arial", 10, "bold")
+        ).pack(anchor="w", pady=(0, 8))
+
+        selected_ids = set()
+        checks_frame = tk.Frame(form, bg=CARD)
+        checks_frame.pack(fill="x")
+
+        for character in characters:
+            variable = tk.BooleanVar(value=False)
+
+            def toggle_character(char_id=character["id"], var=variable):
+                if var.get():
+                    if len(selected_ids) >= 4:
+                        var.set(False)
+                        messagebox.showwarning(
+                            "Team Limit",
+                            "A team can contain exactly four characters."
+                        )
+                        return
+                    selected_ids.add(char_id)
+                else:
+                    selected_ids.discard(char_id)
+                count_label.config(
+                    text=f"Selected: {len(selected_ids)} / 4"
+                )
+
+            check = tk.Checkbutton(
+                checks_frame,
+                text=character["name"],
+                variable=variable,
+                command=toggle_character,
+                bg=CARD, fg=TEXT, selectcolor=SIDEBAR,
+                activebackground=CARD, activeforeground=TEXT
+            )
+            check.pack(anchor="w")
+
+        count_label = tk.Label(
+            form, text="Selected: 0 / 4",
+            bg=CARD, fg=HIGHLIGHT, font=("Arial", 10, "bold")
+        )
+        count_label.pack(anchor="w", pady=12)
+
+        def save_team():
+            name = team_name.get().strip()
+            if not name:
+                messagebox.showwarning("Missing Name", "Enter a team name.")
+                return
+            if len(selected_ids) != 4:
+                messagebox.showwarning(
+                    "Team Incomplete", "Select exactly four different characters."
+                )
+                return
+
+            next_id = max(
+                [team.get("id", 0) for team in self.game_data["teams"]] + [0]
+            ) + 1
+            self.game_data["teams"].append({
+                "id": next_id,
+                "name": name,
+                "character_ids": list(selected_ids)
+            })
+            self.save_game()
+            messagebox.showinfo("Team Saved", f"'{name}' has been saved.")
+            self.show_team_builder()
+
+        self.make_button(
+            form, "Save Team", save_team, primary=True
+        ).pack(anchor="e")
+
+        saved = tk.Frame(self.content, bg=BG)
+        saved.pack(fill="both", expand=True, padx=32, pady=15)
+
+        tk.Label(
+            saved, text="Saved Teams", bg=BG, fg=TEXT,
+            font=("Arial", 14, "bold")
+        ).pack(anchor="w", pady=(0, 8))
+
+        for team in self.game_data["teams"]:
+            names = []
+            for char_id in team.get("character_ids", []):
+                for character in characters:
+                    if character["id"] == char_id:
+                        names.append(character["name"])
+            tk.Label(
+                saved,
+                text=f"{team['name']}: {', '.join(names)}",
+                bg=CARD, fg=TEXT, anchor="w", padx=12, pady=9
+            ).pack(fill="x", pady=3)
+
+    # --------------------------------------------------------
+    # BUILD COMPARISON - BASIC RECORDED STAT COMPARISON
+    # --------------------------------------------------------
+
+    def show_build_comparison(self):
+        self.ensure_game_layout()
+        self.current_page = "build_comparison"
+        self.clear_content()
+        self.set_active_nav("Build Comparison")
+        self.page_header(
+            "Build Comparison",
+            "Compare recorded stats for two characters in your collection."
+        )
+
+        characters = self.game_data["characters"]
+        if len(characters) < 2:
+            tk.Label(
+                self.content,
+                text="Add at least two characters to use this comparison page.",
+                bg=BG, fg=MUTED
+            ).pack(pady=30)
+            return
+
+        names = [character["name"] for character in characters]
+        left = ttk.Combobox(self.content, values=names, state="readonly")
+        right = ttk.Combobox(self.content, values=names, state="readonly")
+        left.set(names[0])
+        right.set(names[1])
+
+        controls = tk.Frame(self.content, bg=BG)
+        controls.pack(fill="x", padx=32, pady=15)
+        left.pack(in_=controls, side="left", padx=(0, 10), ipady=5)
+        right.pack(in_=controls, side="left", ipady=5)
+
+        result = tk.Label(
+            self.content, text="Choose two characters and select Compare.",
+            bg=BG, fg=TEXT, font=("Arial", 11), justify="left"
+        )
+        result.pack(anchor="w", padx=32, pady=20)
+
+        def compare():
+            first = next((c for c in characters if c["name"] == left.get()), None)
+            second = next((c for c in characters if c["name"] == right.get()), None)
+            if not first or not second or first["id"] == second["id"]:
+                messagebox.showwarning(
+                    "Choose Two Characters",
+                    "Select two different characters."
+                )
+                return
+
+            stats = ["hp", "atk", "def", "spd", "crit_rate", "crit_dmg"]
+            lines = [f"{'STAT':<15} {first['name']:<18} {second['name']}"]
+            lines.append("-" * 55)
+            for stat in stats:
+                a = first.get("build", {}).get(stat, "—") or "—"
+                b = second.get("build", {}).get(stat, "—") or "—"
+                lines.append(f"{stat.upper():<15} {str(a):<18} {b}")
+            result.config(text="\n".join(lines), font=("Courier New", 10))
+
+        self.make_button(
+            self.content, "Compare", compare, primary=True
+        ).pack(anchor="w", padx=32)
+
+        tk.Label(
+            self.content,
+            text="This compares entered values only; it does not calculate damage or recommend an optimal build.",
+            bg=BG, fg=MUTED, font=("Arial", 8)
+        ).pack(anchor="w", padx=32, pady=12)
+
+
+# ============================================================
+# START APPLICATION
+# ============================================================
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TaskTrack(root)
+    root.mainloop()
