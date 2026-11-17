@@ -1,0 +1,1339 @@
+import json
+import os
+import shutil
+import re
+import tkinter as tk
+from tkinter import ttk, messagebox, filedialog
+from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
+
+# Pillow is optional. TaskTrack still works without it.
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except ImportError:
+    PIL_AVAILABLE = False
+
+# OCR is optional. Install pytesseract and the Tesseract OCR application.
+try:
+    import pytesseract
+    OCR_AVAILABLE = True
+except ImportError:
+    pytesseract = None
+    OCR_AVAILABLE = False
+
+
+# ============================================================
+# TASKTRACK - THEME AND FILE LOCATIONS
+# ============================================================
+
+BG = "#17151D"
+SIDEBAR = "#211D29"
+CARD = "#30283A"
+ACCENT = "#88739E"
+SELECTED = "#665477"
+HIGHLIGHT = "#C4B8D0"
+TEXT = "#E5E0EA"
+MUTED = "#A99FB5"
+BORDER = "#51465C"
+
+# Six application-wide color themes. These are interface color palettes,
+# not character artwork or copied game UI assets.
+THEMES = {
+    "Blade": {"BG": "#101722", "SIDEBAR": "#172333", "CARD": "#243449", "ACCENT": "#B83D4B", "SELECTED": "#354D6B", "HIGHLIGHT": "#E36A73", "TEXT": "#EAF0F7", "MUTED": "#AAB9CA", "BORDER": "#40536B"},
+    "Phainon": {"BG": "#19180F", "SIDEBAR": "#292719", "CARD": "#3A3824", "ACCENT": "#C5A33D", "SELECTED": "#6D6337", "HIGHLIGHT": "#F0D875", "TEXT": "#F5F1DF", "MUTED": "#C7C09A", "BORDER": "#687052"},
+    "Cyrene": {"BG": "#FFF5FA", "SIDEBAR": "#FCE8F2", "CARD": "#FFFFFF", "ACCENT": "#F2A9CC", "SELECTED": "#DCEFFA", "HIGHLIGHT": "#A9DDF2", "TEXT": "#493747", "MUTED": "#927F8E", "BORDER": "#EBC9DC"},
+    "Firefly": {"BG": "#101C1B", "SIDEBAR": "#172B28", "CARD": "#203A34", "ACCENT": "#62B89A", "SELECTED": "#347C68", "HIGHLIGHT": "#A9E6C9", "TEXT": "#E7F4ED", "MUTED": "#A8C8B8", "BORDER": "#3D695A"},
+    "Castorice": {"BG": "#191426", "SIDEBAR": "#261D38", "CARD": "#362A4D", "ACCENT": "#9B79C8", "SELECTED": "#654B8D", "HIGHLIGHT": "#D8C2F4", "TEXT": "#F2ECFA", "MUTED": "#BFB0D5", "BORDER": "#5E4C7B"},
+    "Acheron – Red Mode": {"BG": "#160E12", "SIDEBAR": "#241318", "CARD": "#351B23", "ACCENT": "#C23B50", "SELECTED": "#81283B", "HIGHLIGHT": "#F08A9B", "TEXT": "#F5E9EC", "MUTED": "#C4A3AA", "BORDER": "#66303D"}
+}
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ACADEMIC_FILE = os.path.join(BASE_DIR, "academic_data.json")
+FINANCE_FILE = os.path.join(BASE_DIR, "finance_data.json")
+SETTINGS_FILE = os.path.join(BASE_DIR, "tasktrack_settings.json")
+
+
+# ============================================================
+# BASIC JSON STORAGE
+# ============================================================
+
+def load_json(path, default_data):
+    """Load JSON data. Return default_data if the file does not exist."""
+    if not os.path.exists(path):
+        return default_data
+
+    try:
+        with open(path, "r", encoding="utf-8") as file:
+            return json.load(file)
+    except (json.JSONDecodeError, OSError):
+        messagebox.showwarning(
+            "Data file problem",
+            f"Could not read {os.path.basename(path)}. "
+            "The application will start with empty data."
+        )
+        return default_data
+
+
+def save_json(path, data):
+    """Save data as readable JSON."""
+    try:
+        with open(path, "w", encoding="utf-8") as file:
+            json.dump(data, file, indent=4, ensure_ascii=False)
+        return True
+    except OSError as error:
+        messagebox.showerror("Save error", f"Could not save data:\n{error}")
+        return False
+
+
+# ============================================================
+# SIMPLE STACK FOR ACADEMIC UNDO
+# ============================================================
+
+class ActionStack:
+    """A small stack that stores previous academic task states."""
+
+    def __init__(self):
+        self.items = []
+
+    def push(self, value):
+        self.items.append(value)
+
+    def pop(self):
+        if self.is_empty():
+            return None
+        return self.items.pop()
+
+    def is_empty(self):
+        return len(self.items) == 0
+
+
+# ============================================================
+# MAIN APPLICATION
+# ============================================================
+
+class TaskTrack:
+
+    def __init__(self, root):
+        self.root = root
+        self.root.title("TaskTrack")
+        self.root.geometry("1180x760")
+        self.root.minsize(900, 620)
+        self.root.configure(bg=BG)
+
+        saved_settings = load_json(SETTINGS_FILE, {"theme": "Acheron – Red Mode"})
+        self.current_theme = saved_settings.get("theme", "Acheron – Red Mode")
+        if self.current_theme not in THEMES:
+            self.current_theme = "Acheron – Red Mode"
+        self.apply_palette(self.current_theme, refresh=False)
+        self.root.configure(bg=BG)
+
+        self.academic_data = load_json(
+            ACADEMIC_FILE,
+            {"tasks": []}
+        )
+        self.finance_data = load_json(
+            FINANCE_FILE,
+            {"month": date.today().strftime("%Y-%m"), "allowance": 0.0,
+             "transactions": [], "archive": []}
+        )
+
+        # Keep compatibility if an older JSON file is missing a key.
+        self.academic_data.setdefault("tasks", [])
+        self.finance_data.setdefault("transactions", [])
+        self.finance_data.setdefault("archive", [])
+        self.finance_data.setdefault("allowance", 0.0)
+        self.finance_data.setdefault("month", date.today().strftime("%Y-%m"))
+        self.finance_undo_stack = ActionStack()
+        self.undo_stack = ActionStack()
+        self.rollover_finance_month()
+        self.current_mode = None
+        self.current_page = None
+        self.selected_character_id = None
+        self.character_photo = None
+
+        self.setup_styles()
+        self.show_landing_page()
+
+    def apply_palette(self, theme_name, refresh=True):
+        """Apply one theme to every screen in the application."""
+        global BG, SIDEBAR, CARD, ACCENT, SELECTED, HIGHLIGHT, TEXT, MUTED, BORDER
+        if theme_name not in THEMES:
+            return
+        self.current_theme = theme_name
+        palette = THEMES[theme_name]
+        BG = palette["BG"]
+        SIDEBAR = palette["SIDEBAR"]
+        CARD = palette["CARD"]
+        ACCENT = palette["ACCENT"]
+        SELECTED = palette["SELECTED"]
+        HIGHLIGHT = palette["HIGHLIGHT"]
+        TEXT = palette["TEXT"]
+        MUTED = palette["MUTED"]
+        BORDER = palette["BORDER"]
+        self.root.configure(bg=BG)
+        if refresh:
+            save_json(SETTINGS_FILE, {"theme": theme_name})
+            self.setup_styles()
+            page = self.current_page
+            if page == "landing" or self.current_mode is None:
+                self.show_landing_page()
+            elif self.current_mode == "academic":
+                if page == "academic_list":
+                    self.show_all_tasks()
+                else:
+                    self.show_academic_dashboard()
+            elif self.current_mode == "finance":
+                finance_pages = {
+                    "finance_dashboard": self.show_finance_dashboard,
+                    "finance_history": self.show_finance_history,
+                }
+                finance_pages.get(page, self.show_finance_dashboard)()
+
+    def open_theme_settings(self):
+        """Show a theme picker that applies changes immediately."""
+        window = tk.Toplevel(self.root)
+        window.title("TaskTrack Appearance")
+        window.geometry("540x590")
+        window.resizable(False, False)
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(window, text="Choose Your Theme", bg=BG, fg=TEXT,
+                 font=("Arial", 19, "bold")).pack(anchor="w", padx=24, pady=(22, 4))
+        tk.Label(window, text="Your selection changes both Academic Mode and Finance Mode.",
+                 bg=BG, fg=MUTED, font=("Arial", 9)).pack(anchor="w", padx=24, pady=(0, 16))
+
+        grid = tk.Frame(window, bg=BG)
+        grid.pack(fill="both", expand=True, padx=18, pady=4)
+        for index, (name, colors) in enumerate(THEMES.items()):
+            row, col = divmod(index, 2)
+            swatch = tk.Frame(grid, bg=colors["CARD"], highlightthickness=1,
+                              highlightbackground=colors["BORDER"], padx=12, pady=10)
+            swatch.grid(row=row, column=col, padx=6, pady=6, sticky="nsew")
+            tk.Label(swatch, text=name, bg=colors["CARD"], fg=colors["TEXT"],
+                     font=("Arial", 10, "bold")).pack(anchor="w")
+            strip = tk.Frame(swatch, bg=colors["CARD"])
+            strip.pack(anchor="w", pady=8)
+            for color in (colors["BG"], colors["SIDEBAR"], colors["ACCENT"], colors["HIGHLIGHT"]):
+                tk.Frame(strip, bg=color, width=30, height=18).pack(side="left", padx=(0, 5))
+            tk.Button(swatch, text="Apply Theme", command=lambda n=name: self.apply_palette(n),
+                      bg=colors["ACCENT"], fg=colors["TEXT"], activebackground=colors["SELECTED"],
+                      activeforeground=colors["TEXT"], relief="flat", bd=0, padx=10, pady=6,
+                      cursor="hand2").pack(anchor="w")
+        for col in range(2):
+            grid.grid_columnconfigure(col, weight=1)
+        self.make_button(window, "Close", window.destroy).pack(pady=(8, 18))
+
+    # --------------------------------------------------------
+    # STYLES AND REUSABLE UI HELPERS
+    # --------------------------------------------------------
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        style.configure(
+            "Treeview",
+            background=CARD,
+            foreground=TEXT,
+            fieldbackground=CARD,
+            rowheight=32,
+            borderwidth=0,
+            font=("Arial", 10)
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=SIDEBAR,
+            foreground=HIGHLIGHT,
+            font=("Arial", 10, "bold"),
+            relief="flat"
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", SELECTED)],
+            foreground=[("selected", TEXT)]
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground=CARD,
+            background=CARD,
+            foreground=TEXT,
+            arrowcolor=TEXT
+        )
+
+    def clear_window(self):
+        for widget in self.root.winfo_children():
+            widget.destroy()
+
+    def clear_content(self):
+        for widget in self.content.winfo_children():
+            widget.destroy()
+
+    def make_button(self, parent, text, command, primary=False, **kwargs):
+        return tk.Button(
+            parent,
+            text=text,
+            command=command,
+            bg=ACCENT if primary else CARD,
+            fg="white" if primary else TEXT,
+            activebackground=SELECTED,
+            activeforeground="white",
+            font=("Arial", 10, "bold" if primary else "normal"),
+            relief="flat",
+            bd=0,
+            padx=14,
+            pady=9,
+            cursor="hand2",
+            **kwargs
+        )
+
+    def page_header(self, title, subtitle=""):
+        header = tk.Frame(self.content, bg=BG)
+        header.pack(fill="x", padx=32, pady=(28, 20))
+
+        tk.Label(
+            header,
+            text=title,
+            bg=BG,
+            fg=TEXT,
+            font=("Arial", 23, "bold")
+        ).pack(anchor="w")
+
+        if subtitle:
+            tk.Label(
+                header,
+                text=subtitle,
+                bg=BG,
+                fg=MUTED,
+                font=("Arial", 10)
+            ).pack(anchor="w", pady=(5, 0))
+
+    def make_card(self, parent, title, value, note=""):
+        card = tk.Frame(parent, bg=CARD, padx=18, pady=16)
+        tk.Label(
+            card, text=title, bg=CARD, fg=MUTED,
+            font=("Arial", 9)
+        ).pack(anchor="w")
+        tk.Label(
+            card, text=str(value), bg=CARD, fg=HIGHLIGHT,
+            font=("Arial", 24, "bold")
+        ).pack(anchor="w", pady=(5, 0))
+        if note:
+            tk.Label(
+                card, text=note, bg=CARD, fg=MUTED,
+                font=("Arial", 8)
+            ).pack(anchor="w", pady=(3, 0))
+        return card
+
+    def make_page_title(self, parent, title, subtitle=""):
+        tk.Label(
+            parent, text=title, bg=BG, fg=TEXT,
+            font=("Arial", 21, "bold")
+        ).pack(anchor="w", pady=(0, 5))
+        if subtitle:
+            tk.Label(
+                parent, text=subtitle, bg=BG, fg=MUTED,
+                font=("Arial", 10)
+            ).pack(anchor="w", pady=(0, 18))
+
+    # --------------------------------------------------------
+    # LANDING PAGE - ONLY TWO OPTIONS
+    # --------------------------------------------------------
+
+    def show_landing_page(self):
+        self.current_mode = None
+        self.current_page = "landing"
+        self.clear_window()
+
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True)
+
+        center = tk.Frame(outer, bg=BG)
+        center.place(relx=0.5, rely=0.48, anchor="center")
+
+        tk.Label(
+            center,
+            text="TASKTRACK",
+            bg=BG,
+            fg=HIGHLIGHT,
+            font=("Arial", 30, "bold")
+        ).pack()
+
+        tk.Label(
+            center,
+            text="YOUR SPACE. YOUR PROGRESS.",
+            bg=BG,
+            fg=MUTED,
+            font=("Arial", 9)
+        ).pack(pady=(5, 12))
+
+        tk.Label(
+            center,
+            text="Choose your workspace",
+            bg=BG,
+            fg=TEXT,
+            font=("Arial", 13)
+        ).pack(pady=(0, 28))
+
+        choices = tk.Frame(center, bg=BG)
+        choices.pack()
+
+        self.create_mode_card(
+            choices,
+            "ACADEMIC MODE",
+            "Organize subjects, assignments,\\nand academic deadlines.",
+            "🎓",
+            self.show_academic_dashboard
+        )
+        self.create_mode_card(
+            choices,
+            "FINANCE MODE",
+            "Track your allowance, expenses,\\nand remaining balance.",
+            "₱",
+            self.show_finance_dashboard
+        )
+
+        self.make_button(center, "⚙ Appearance / Themes", self.open_theme_settings).pack(pady=(18, 0))
+
+        tk.Label(
+            center,
+            text="TaskTrack • Academic and student personal finance management",
+            bg=BG,
+            fg=MUTED,
+            font=("Arial", 8)
+        ).pack(pady=(28, 0))
+
+    def create_mode_card(self, parent, title, description, symbol, command):
+        card = tk.Frame(
+            parent, bg=CARD, width=280, height=245,
+            highlightthickness=1, highlightbackground=BORDER
+        )
+        card.pack(side="left", padx=12)
+        card.pack_propagate(False)
+
+        tk.Label(
+            card, text=symbol, bg=CARD, fg=HIGHLIGHT,
+            font=("Arial", 34)
+        ).pack(pady=(25, 8))
+
+        tk.Label(
+            card, text=title, bg=CARD, fg=TEXT,
+            font=("Arial", 15, "bold")
+        ).pack()
+
+        tk.Label(
+            card, text=description, bg=CARD, fg=MUTED,
+            font=("Arial", 9), justify="center"
+        ).pack(pady=12)
+
+        self.make_button(
+            card, "ENTER", command, primary=True
+        ).pack(pady=5)
+
+    # --------------------------------------------------------
+    # MODE LAYOUTS AND NAVIGATION
+    # --------------------------------------------------------
+
+    def build_mode_layout(self, mode, navigation):
+        self.current_mode = mode
+        self.clear_window()
+
+        self.sidebar = tk.Frame(self.root, bg=SIDEBAR, width=225)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+
+        self.content = tk.Frame(self.root, bg=BG)
+        self.content.pack(side="right", fill="both", expand=True)
+
+        tk.Label(
+            self.sidebar,
+            text="TASKTRACK",
+            bg=SIDEBAR,
+            fg=HIGHLIGHT,
+            font=("Arial", 18, "bold")
+        ).pack(pady=(25, 3))
+
+        mode_label = "ACADEMIC MODE" if mode == "academic" else "FINANCE MODE"
+        tk.Label(
+            self.sidebar,
+            text=mode_label,
+            bg=SIDEBAR,
+            fg=MUTED,
+            font=("Arial", 9, "bold")
+        ).pack(pady=(0, 25))
+
+        self.nav_buttons = {}
+        for label, command in navigation:
+            button = tk.Button(
+                self.sidebar,
+                text=label,
+                command=command,
+                bg=SIDEBAR,
+                fg=TEXT,
+                activebackground=SELECTED,
+                activeforeground="white",
+                font=("Arial", 10),
+                relief="flat",
+                anchor="w",
+                padx=20,
+                pady=11,
+                cursor="hand2"
+            )
+            button.pack(fill="x", padx=9, pady=2)
+            self.nav_buttons[label] = button
+
+        self.make_button(self.sidebar, "⚙ Appearance / Themes", self.open_theme_settings).pack(
+            fill="x", padx=12, pady=(12, 4)
+        )
+        tk.Frame(self.sidebar, bg=SIDEBAR).pack(fill="both", expand=True)
+
+        self.make_button(
+            self.sidebar,
+            "← Back to Main Menu",
+            self.show_landing_page
+        ).pack(fill="x", padx=12, pady=18)
+
+    def set_active_nav(self, selected):
+        for label, button in self.nav_buttons.items():
+            button.configure(
+                bg=SELECTED if label == selected else SIDEBAR,
+                fg="white" if label == selected else TEXT
+            )
+
+    # --------------------------------------------------------
+    # ACADEMIC MODE
+    # --------------------------------------------------------
+
+    def academic_navigation(self):
+        return [
+            ("Dashboard", self.show_academic_dashboard),
+            ("My Tasks", self.show_all_tasks),
+            ("Major Subjects", lambda: self.show_category_tasks("Major")),
+            ("Minor Subjects", lambda: self.show_category_tasks("Minor")),
+            ("Upcoming Deadlines", self.show_upcoming_tasks),
+            ("Completed Tasks", self.show_completed_tasks)
+        ]
+
+    def ensure_academic_layout(self):
+        if self.current_mode != "academic":
+            self.build_mode_layout("academic", self.academic_navigation())
+
+    def save_academic(self):
+        save_json(ACADEMIC_FILE, self.academic_data)
+
+    def push_undo_state(self):
+        # Store a copy so later edits do not change the saved undo state.
+        self.undo_stack.push(json.dumps(self.academic_data))
+
+    def undo_academic_action(self):
+        previous = self.undo_stack.pop()
+        if previous is None:
+            messagebox.showinfo("Undo", "There are no actions to undo.")
+            return
+
+        self.academic_data = json.loads(previous)
+        self.save_academic()
+        self.show_academic_dashboard()
+        messagebox.showinfo("Undo", "The previous academic task state was restored.")
+
+    def show_academic_dashboard(self):
+        self.ensure_academic_layout()
+        self.current_page = "academic_dashboard"
+        self.clear_content()
+        self.set_active_nav("Dashboard")
+
+        tasks = self.academic_data["tasks"]
+        total = len(tasks)
+        completed = sum(1 for item in tasks if item.get("status") == "Completed")
+        pending = total - completed
+        major = sum(1 for item in tasks if item.get("category") == "Major")
+        minor = sum(1 for item in tasks if item.get("category") == "Minor")
+
+        self.page_header(
+            "Academic Dashboard",
+            "Keep track of your subjects, assignments, and deadlines."
+        )
+
+        stats = tk.Frame(self.content, bg=BG)
+        stats.pack(fill="x", padx=32)
+
+        cards = [
+            ("Total Tasks", total),
+            ("Pending", pending),
+            ("Completed", completed),
+            ("Major / Minor", f"{major} / {minor}")
+        ]
+        for title, value in cards:
+            self.make_card(stats, title, value).pack(
+                side="left", fill="both", expand=True, padx=(0, 10)
+            )
+
+        section = tk.Frame(self.content, bg=BG)
+        section.pack(fill="both", expand=True, padx=32, pady=25)
+
+        tk.Label(
+            section, text="Recent Tasks", bg=BG, fg=TEXT,
+            font=("Arial", 15, "bold")
+        ).pack(anchor="w", pady=(0, 12))
+
+        self.create_task_table(section, tasks[:8])
+
+        actions = tk.Frame(section, bg=BG)
+        actions.pack(fill="x", pady=14)
+
+        self.make_button(
+            actions, "+ Add Task", self.add_task_dialog, primary=True
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            actions, "Undo Last Action", self.undo_academic_action
+        ).pack(side="right")
+
+    def create_task_table(self, parent, tasks, show_actions=True):
+        columns = ("title", "subject", "category", "due", "priority", "status")
+        table = ttk.Treeview(parent, columns=columns, show="headings")
+
+        headings = {
+            "title": "Task",
+            "subject": "Subject",
+            "category": "Category",
+            "due": "Due Date",
+            "priority": "Priority",
+            "status": "Status"
+        }
+        widths = {
+            "title": 190, "subject": 150, "category": 85,
+            "due": 105, "priority": 85, "status": 100
+        }
+
+        for column in columns:
+            table.heading(column, text=headings[column])
+            table.column(column, width=widths[column], minwidth=65)
+
+        for task in tasks:
+            table.insert(
+                "", "end", iid=str(task.get("id", id(task))),
+                values=(
+                    task.get("title", ""),
+                    task.get("subject", ""),
+                    task.get("category", ""),
+                    task.get("due", ""),
+                    task.get("priority", ""),
+                    task.get("status", "Pending")
+                )
+            )
+
+        table.pack(fill="both", expand=True)
+
+        if show_actions:
+            table.bind("<Double-1>", lambda event: self.edit_selected_task(table))
+        return table
+
+    def add_task_dialog(self, existing_task=None):
+        editing = existing_task is not None
+        window = tk.Toplevel(self.root)
+        window.title("Edit Task" if editing else "Add Task")
+        window.geometry("430x560")
+        window.configure(bg=BG)
+        window.resizable(False, False)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window,
+            text="Edit Task" if editing else "Add New Task",
+            bg=BG, fg=TEXT, font=("Arial", 18, "bold")
+        ).pack(pady=(22, 16))
+
+        fields = {}
+
+        def add_entry(label, key, initial=""):
+            tk.Label(
+                window, text=label, bg=BG, fg=TEXT,
+                font=("Arial", 9)
+            ).pack(anchor="w", padx=35)
+            entry = tk.Entry(
+                window, bg=CARD, fg=TEXT,
+                insertbackground=TEXT, relief="flat"
+            )
+            entry.pack(fill="x", padx=35, pady=(5, 12), ipady=7)
+            entry.insert(0, initial)
+            fields[key] = entry
+
+        add_entry("Task Title", "title", existing_task.get("title", "") if editing else "")
+        add_entry("Subject Name", "subject", existing_task.get("subject", "") if editing else "")
+
+        tk.Label(
+            window, text="Subject Category", bg=BG, fg=TEXT
+        ).pack(anchor="w", padx=35)
+        category = ttk.Combobox(
+            window, values=["Major", "Minor"], state="readonly"
+        )
+        category.set(existing_task.get("category", "Major") if editing else "Major")
+        category.pack(fill="x", padx=35, pady=(5, 12), ipady=4)
+
+        add_entry(
+            "Due Date (YYYY-MM-DD)", "due",
+            existing_task.get("due", "") if editing else ""
+        )
+
+        tk.Label(
+            window, text="Priority", bg=BG, fg=TEXT
+        ).pack(anchor="w", padx=35)
+        priority = ttk.Combobox(
+            window, values=["High", "Medium", "Low"], state="readonly"
+        )
+        priority.set(existing_task.get("priority", "Medium") if editing else "Medium")
+        priority.pack(fill="x", padx=35, pady=(5, 12), ipady=4)
+
+        def save_task():
+            title = fields["title"].get().strip()
+            subject = fields["subject"].get().strip()
+            due = fields["due"].get().strip()
+
+            if not title or not subject or not due:
+                messagebox.showwarning(
+                    "Missing Information",
+                    "Please enter a task title, subject, and due date.",
+                    parent=window
+                )
+                return
+
+            try:
+                date.fromisoformat(due)
+            except ValueError:
+                messagebox.showwarning(
+                    "Invalid Date",
+                    "Enter the date using YYYY-MM-DD.",
+                    parent=window
+                )
+                return
+
+            if editing:
+                self.push_undo_state()
+                existing_task.update({
+                    "title": title,
+                    "subject": subject,
+                    "category": category.get(),
+                    "due": due,
+                    "priority": priority.get()
+                })
+            else:
+                self.push_undo_state()
+                next_id = max(
+                    [item.get("id", 0) for item in self.academic_data["tasks"]] + [0]
+                ) + 1
+                self.academic_data["tasks"].append({
+                    "id": next_id,
+                    "title": title,
+                    "subject": subject,
+                    "category": category.get(),
+                    "due": due,
+                    "priority": priority.get(),
+                    "status": "Pending"
+                })
+
+            self.save_academic()
+            window.destroy()
+            self.show_academic_dashboard()
+
+        self.make_button(
+            window, "Save Task", save_task, primary=True
+        ).pack(pady=16)
+
+    def selected_task(self, table):
+        selection = table.selection()
+        if not selection:
+            messagebox.showinfo("Select Task", "Please select a task first.")
+            return None
+        task_id = int(selection[0])
+        for task in self.academic_data["tasks"]:
+            if task.get("id") == task_id:
+                return task
+        return None
+
+    def edit_selected_task(self, table):
+        task = self.selected_task(table)
+        if task:
+            self.add_task_dialog(task)
+
+    def delete_selected_task(self, table):
+        task = self.selected_task(table)
+        if not task:
+            return
+        if messagebox.askyesno("Delete Task", f"Delete '{task['title']}'?"):
+            self.push_undo_state()
+            self.academic_data["tasks"].remove(task)
+            self.save_academic()
+            self.show_all_tasks()
+
+    def complete_selected_task(self, table):
+        task = self.selected_task(table)
+        if not task:
+            return
+        if task.get("status") == "Completed":
+            messagebox.showinfo("Task Status", "This task is already completed.")
+            return
+        self.push_undo_state()
+        task["status"] = "Completed"
+        self.save_academic()
+        self.show_all_tasks()
+
+    def linear_search_tasks(self, query, category=None):
+        """Linear search through task titles and subject names."""
+        matches = []
+        query = query.lower().strip()
+        for task in self.academic_data["tasks"]:
+            if category and task.get("category") != category:
+                continue
+            searchable = (
+                task.get("title", "").lower()
+                + " "
+                + task.get("subject", "").lower()
+            )
+            if query in searchable:
+                matches.append(task)
+        return matches
+
+    def insertion_sort_tasks(self, tasks):
+        """Insertion sort by due date, earliest first."""
+        result = tasks[:]
+        for index in range(1, len(result)):
+            current = result[index]
+            position = index - 1
+            while position >= 0 and result[position].get("due", "") > current.get("due", ""):
+                result[position + 1] = result[position]
+                position -= 1
+            result[position + 1] = current
+        return result
+
+    def show_task_list(self, title, subtitle, tasks, active_nav, allow_search=True):
+        self.ensure_academic_layout()
+        self.current_page = "academic_list"
+        self.clear_content()
+        self.set_active_nav(active_nav)
+        self.page_header(title, subtitle)
+
+        toolbar = tk.Frame(self.content, bg=BG)
+        toolbar.pack(fill="x", padx=32, pady=(0, 12))
+
+        search_var = tk.StringVar()
+        if allow_search:
+            search_entry = tk.Entry(
+                toolbar, textvariable=search_var,
+                bg=CARD, fg=TEXT, insertbackground=TEXT,
+                relief="flat", font=("Arial", 10)
+            )
+            search_entry.pack(side="left", fill="x", expand=True, ipady=9)
+
+        table_area = tk.Frame(self.content, bg=BG)
+        table_area.pack(fill="both", expand=True, padx=32, pady=(0, 10))
+
+        table = self.create_task_table(table_area, tasks)
+
+        def refresh_results(*_):
+            query = search_var.get()
+            if query:
+                results = self.linear_search_tasks(query)
+            else:
+                results = tasks
+
+            for row in table.get_children():
+                table.delete(row)
+
+            for task in results:
+                table.insert(
+                    "", "end", iid=str(task.get("id", id(task))),
+                    values=(
+                        task.get("title", ""),
+                        task.get("subject", ""),
+                        task.get("category", ""),
+                        task.get("due", ""),
+                        task.get("priority", ""),
+                        task.get("status", "Pending")
+                    )
+                )
+
+        if allow_search:
+            search_var.trace_add("write", refresh_results)
+
+        buttons = tk.Frame(self.content, bg=BG)
+        buttons.pack(fill="x", padx=32, pady=(0, 22))
+
+        self.make_button(
+            buttons, "+ Add Task", self.add_task_dialog, primary=True
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Edit Selected", lambda: self.edit_selected_task(table)
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Mark Completed", lambda: self.complete_selected_task(table)
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Delete Selected", lambda: self.delete_selected_task(table)
+        ).pack(side="right")
+
+    def show_all_tasks(self):
+        tasks = self.insertion_sort_tasks(self.academic_data["tasks"])
+        self.show_task_list(
+            "My Tasks", "Search, edit, complete, or delete academic tasks.",
+            tasks, "My Tasks"
+        )
+
+    def show_category_tasks(self, category):
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("category") == category
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        nav = "Major Subjects" if category == "Major" else "Minor Subjects"
+        self.show_task_list(
+            f"{category} Subjects",
+            f"Tasks categorized under {category.lower()} subjects.",
+            tasks, nav
+        )
+
+    def show_upcoming_tasks(self):
+        today = date.today().isoformat()
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("status") == "Pending" and task.get("due", "") >= today
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        self.show_task_list(
+            "Upcoming Deadlines",
+            "Pending tasks with deadlines today or later.",
+            tasks, "Upcoming Deadlines"
+        )
+
+    def show_completed_tasks(self):
+        tasks = [
+            task for task in self.academic_data["tasks"]
+            if task.get("status") == "Completed"
+        ]
+        tasks = self.insertion_sort_tasks(tasks)
+        self.show_task_list(
+            "Completed Tasks",
+            "Review your finished academic tasks.",
+            tasks, "Completed Tasks"
+        )
+
+
+    # --------------------------------------------------------
+    # FINANCE MODE - STUDENT ALLOWANCE AND EXPENSE TRACKER
+    # --------------------------------------------------------
+
+    def rollover_finance_month(self):
+        """Archive the previous month's records when a new month begins."""
+        current_month = date.today().strftime("%Y-%m")
+        saved_month = self.finance_data.get("month", current_month)
+        if saved_month != current_month:
+            old_transactions = self.finance_data.get("transactions", [])
+            old_allowance = float(self.finance_data.get("allowance", 0) or 0)
+            if old_transactions or old_allowance:
+                self.finance_data.setdefault("archive", []).append({
+                    "month": saved_month,
+                    "allowance": old_allowance,
+                    "transactions": old_transactions
+                })
+            self.finance_data["month"] = current_month
+            self.finance_data["allowance"] = 0.0
+            self.finance_data["transactions"] = []
+            self.save_finance()
+
+    def save_finance(self):
+        save_json(FINANCE_FILE, self.finance_data)
+
+    def finance_totals(self):
+        """Calculate income, expenses, and the current available balance."""
+        allowance = float(self.finance_data.get("allowance", 0) or 0)
+        extra_income = sum(
+            float(item.get("amount", 0) or 0)
+            for item in self.finance_data["transactions"]
+            if item.get("type") == "income"
+        )
+        expenses = sum(
+            float(item.get("amount", 0) or 0)
+            for item in self.finance_data["transactions"]
+            if item.get("type") == "expense"
+        )
+        return allowance, extra_income, expenses, allowance + extra_income - expenses
+
+    def finance_navigation(self):
+        return [
+            ("Dashboard", self.show_finance_dashboard),
+            ("Expense History", self.show_finance_history),
+        ]
+
+    def ensure_finance_layout(self):
+        if self.current_mode != "finance":
+            self.build_mode_layout("finance", self.finance_navigation())
+
+    def push_finance_undo(self):
+        self.finance_undo_stack.push(json.dumps(self.finance_data))
+
+    def undo_finance_action(self):
+        previous = self.finance_undo_stack.pop()
+        if previous is None:
+            messagebox.showinfo("Undo", "There are no finance actions to undo.")
+            return
+        self.finance_data = json.loads(previous)
+        self.save_finance()
+        self.show_finance_dashboard()
+        messagebox.showinfo("Undo", "The previous finance action was restored.")
+
+    def show_finance_dashboard(self):
+        self.rollover_finance_month()
+        self.ensure_finance_layout()
+        self.current_page = "finance_dashboard"
+        self.clear_content()
+        self.set_active_nav("Dashboard")
+
+        allowance, extra_income, expenses, balance = self.finance_totals()
+        self.page_header(
+            "Student Finance Dashboard",
+            "Record your allowance and expenses to keep track of your remaining money."
+        )
+
+        stats = tk.Frame(self.content, bg=BG)
+        stats.pack(fill="x", padx=32)
+        cards = [
+            ("Starting Allowance", f"₱{allowance:,.2f}"),
+            ("Additional Money", f"₱{extra_income:,.2f}"),
+            ("Total Expenses", f"₱{expenses:,.2f}"),
+            ("Remaining Balance", f"₱{balance:,.2f}"),
+        ]
+        for title, value in cards:
+            self.make_card(stats, title, value).pack(
+                side="left", fill="both", expand=True, padx=(0, 9)
+            )
+
+        if balance < 0:
+            balance_note = "Your recorded expenses are higher than your available money."
+            balance_color = "#E06B75"
+        elif balance == 0:
+            balance_note = "You have used your entire available balance."
+            balance_color = HIGHLIGHT
+        else:
+            balance_note = "This is the money you have left to use."
+            balance_color = HIGHLIGHT
+
+        balance_panel = tk.Frame(self.content, bg=CARD, padx=20, pady=16)
+        balance_panel.pack(fill="x", padx=32, pady=(20, 12))
+        tk.Label(
+            balance_panel, text="AVAILABLE BALANCE",
+            bg=CARD, fg=MUTED, font=("Arial", 9, "bold")
+        ).pack(anchor="w")
+        tk.Label(
+            balance_panel, text=f"₱{balance:,.2f}",
+            bg=CARD, fg=balance_color, font=("Arial", 26, "bold")
+        ).pack(anchor="w", pady=(3, 0))
+        tk.Label(
+            balance_panel, text=balance_note,
+            bg=CARD, fg=MUTED, font=("Arial", 9)
+        ).pack(anchor="w", pady=(3, 0))
+
+        actions = tk.Frame(self.content, bg=BG)
+        actions.pack(fill="x", padx=32, pady=8)
+        self.make_button(
+            actions, "Set Monthly Allowance", self.set_allowance_dialog
+        ).pack(side="left", padx=(0, 8))
+        self.make_button(
+            actions, "+ Add Expense", self.add_finance_transaction,
+            primary=True
+        ).pack(side="left", padx=(0, 8))
+        self.make_button(
+            actions, "+ Add Money", self.add_income_dialog
+        ).pack(side="left", padx=(0, 8))
+        self.make_button(
+            actions, "Undo Last Action", self.undo_finance_action
+        ).pack(side="right")
+
+        recent = tk.Frame(self.content, bg=BG)
+        recent.pack(fill="both", expand=True, padx=32, pady=(14, 22))
+        tk.Label(
+            recent, text="Recent Transactions", bg=BG, fg=TEXT,
+            font=("Arial", 14, "bold")
+        ).pack(anchor="w", pady=(0, 8))
+        self.create_finance_table(recent, self.finance_data["transactions"][-6:][::-1])
+
+    def set_allowance_dialog(self):
+        window = tk.Toplevel(self.root)
+        window.title("Set Monthly Allowance")
+        window.geometry("390x240")
+        window.resizable(False, False)
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window, text="Set Monthly Allowance", bg=BG, fg=TEXT,
+            font=("Arial", 17, "bold")
+        ).pack(anchor="w", padx=25, pady=(22, 8))
+        tk.Label(
+            window, text="Enter the money you have available for this month.",
+            bg=BG, fg=MUTED, font=("Arial", 9)
+        ).pack(anchor="w", padx=25)
+
+        entry = tk.Entry(
+            window, bg=CARD, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("Arial", 12)
+        )
+        entry.pack(fill="x", padx=25, pady=15, ipady=8)
+        entry.insert(0, str(self.finance_data.get("allowance", 0) or ""))
+
+        def save_allowance():
+            amount = self.parse_money(entry.get())
+            if amount is None or amount < 0:
+                messagebox.showwarning(
+                    "Invalid Amount", "Enter a valid allowance amount (zero or more).",
+                    parent=window
+                )
+                return
+            self.push_finance_undo()
+            self.finance_data["allowance"] = round(amount, 2)
+            self.save_finance()
+            window.destroy()
+            self.show_finance_dashboard()
+
+        self.make_button(
+            window, "Save Allowance", save_allowance, primary=True
+        ).pack(pady=4)
+
+    @staticmethod
+    def parse_money(value):
+        """Accept positive currency values with up to two decimal places."""
+        try:
+            amount = Decimal(value.strip().replace(",", "").replace("₱", ""))
+            if not amount.is_finite() or amount < 0:
+                return None
+            return float(amount.quantize(Decimal("0.01")))
+        except (InvalidOperation, ValueError, AttributeError):
+            return None
+
+    def add_finance_transaction(self, transaction_type="expense", existing=None):
+        editing = existing is not None
+        is_income = transaction_type == "income"
+        title = "Edit Transaction" if editing else (
+            "Add Additional Money" if is_income else "Add Expense"
+        )
+        window = tk.Toplevel(self.root)
+        window.title(title)
+        window.geometry("430x330")
+        window.resizable(False, False)
+        window.configure(bg=BG)
+        window.transient(self.root)
+        window.grab_set()
+
+        tk.Label(
+            window, text=title, bg=BG, fg=TEXT,
+            font=("Arial", 18, "bold")
+        ).pack(anchor="w", padx=28, pady=(22, 16))
+
+        tk.Label(
+            window, text="Description", bg=BG, fg=MUTED,
+            font=("Arial", 9)
+        ).pack(anchor="w", padx=28)
+        description = tk.Entry(
+            window, bg=CARD, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("Arial", 11)
+        )
+        description.pack(fill="x", padx=28, pady=(5, 14), ipady=8)
+        description.insert(0, existing.get("description", "") if editing else "")
+
+        tk.Label(
+            window, text="Amount (₱)", bg=BG, fg=MUTED,
+            font=("Arial", 9)
+        ).pack(anchor="w", padx=28)
+        amount_entry = tk.Entry(
+            window, bg=CARD, fg=TEXT, insertbackground=TEXT,
+            relief="flat", font=("Arial", 11)
+        )
+        amount_entry.pack(fill="x", padx=28, pady=(5, 14), ipady=8)
+        amount_entry.insert(0, str(existing.get("amount", "")) if editing else "")
+
+        def save_transaction():
+            label = description.get().strip()
+            amount = self.parse_money(amount_entry.get())
+            if not label:
+                messagebox.showwarning(
+                    "Missing Description", "Enter what the transaction is for.",
+                    parent=window
+                )
+                return
+            if amount is None or amount <= 0:
+                messagebox.showwarning(
+                    "Invalid Amount", "Enter an amount greater than zero.",
+                    parent=window
+                )
+                return
+
+            self.push_finance_undo()
+            if editing:
+                existing["description"] = label
+                existing["amount"] = amount
+            else:
+                next_id = max(
+                    [item.get("id", 0) for item in self.finance_data["transactions"]] + [0]
+                ) + 1
+                self.finance_data["transactions"].append({
+                    "id": next_id,
+                    "type": transaction_type,
+                    "description": label,
+                    "amount": amount,
+                    "date": date.today().isoformat()
+                })
+            self.save_finance()
+            window.destroy()
+            if self.current_page == "finance_history":
+                self.show_finance_history()
+            else:
+                self.show_finance_dashboard()
+
+        self.make_button(
+            window, "Save Transaction", save_transaction, primary=True
+        ).pack(pady=8)
+
+    def add_income_dialog(self):
+        self.add_finance_transaction("income")
+
+    def create_finance_table(self, parent, transactions):
+        columns = ("date", "description", "type", "amount")
+        table = ttk.Treeview(parent, columns=columns, show="headings", height=7)
+        headings = {
+            "date": "Date", "description": "Description",
+            "type": "Transaction", "amount": "Amount"
+        }
+        widths = {"date": 110, "description": 250, "type": 130, "amount": 130}
+        for column in columns:
+            table.heading(column, text=headings[column])
+            table.column(column, width=widths[column], minwidth=75)
+        for item in transactions:
+            kind = item.get("type", "expense")
+            prefix = "+" if kind == "income" else "−"
+            table.insert(
+                "", "end", iid=str(item.get("id")),
+                values=(
+                    item.get("date", ""),
+                    item.get("description", ""),
+                    "Additional Money" if kind == "income" else "Expense",
+                    f"{prefix} ₱{float(item.get('amount', 0) or 0):,.2f}"
+                )
+            )
+        table.pack(fill="both", expand=True)
+        return table
+
+    def show_finance_history(self):
+        self.rollover_finance_month()
+        self.ensure_finance_layout()
+        self.current_page = "finance_history"
+        self.clear_content()
+        self.set_active_nav("Expense History")
+        self.page_header(
+            "Transaction History",
+            "Select a transaction and click Edit, or double-click a row to change its description or amount."
+        )
+
+        toolbar = tk.Frame(self.content, bg=BG)
+        toolbar.pack(fill="x", padx=32, pady=(0, 12))
+        search_var = tk.StringVar()
+        search = tk.Entry(
+            toolbar, textvariable=search_var, bg=CARD, fg=TEXT,
+            insertbackground=TEXT, relief="flat", font=("Arial", 10)
+        )
+        search.pack(side="left", fill="x", expand=True, ipady=9)
+
+        table_area = tk.Frame(self.content, bg=BG)
+        table_area.pack(fill="both", expand=True, padx=32)
+        table = self.create_finance_table(
+            table_area, self.finance_data["transactions"]
+        )
+
+        def refresh(*_):
+            query = search_var.get().casefold().strip()
+            for row in table.get_children():
+                table.delete(row)
+            # Linear search through transaction descriptions and dates.
+            for item in self.finance_data["transactions"]:
+                searchable = (
+                    item.get("description", "") + " " + item.get("date", "") +
+                    " " + item.get("type", "")
+                ).casefold()
+                if query and query not in searchable:
+                    continue
+                kind = item.get("type", "expense")
+                prefix = "+" if kind == "income" else "−"
+                table.insert(
+                    "", "end", iid=str(item.get("id")),
+                    values=(
+                        item.get("date", ""), item.get("description", ""),
+                        "Additional Money" if kind == "income" else "Expense",
+                        f"{prefix} ₱{float(item.get('amount', 0) or 0):,.2f}"
+                    )
+                )
+
+        search_var.trace_add("write", refresh)
+
+        def selected_transaction():
+            selection = table.selection()
+            if not selection:
+                messagebox.showinfo("Select Transaction", "Please select a transaction first.")
+                return None
+            selected_id = int(selection[0])
+            return next(
+                (item for item in self.finance_data["transactions"]
+                 if item.get("id") == selected_id),
+                None
+            )
+
+        def edit_selected():
+            item = selected_transaction()
+            if item:
+                self.add_finance_transaction(item.get("type", "expense"), item)
+
+        # Quick editing: double-click a transaction row to open its edit form.
+        table.bind("<Double-1>", lambda _event: edit_selected())
+
+        def delete_selected():
+            item = selected_transaction()
+            if not item:
+                return
+            if messagebox.askyesno(
+                "Delete Transaction",
+                f"Delete '{item.get('description', 'transaction')}'?"
+            ):
+                self.push_finance_undo()
+                self.finance_data["transactions"].remove(item)
+                self.save_finance()
+                self.show_finance_history()
+
+        buttons = tk.Frame(self.content, bg=BG)
+        buttons.pack(fill="x", padx=32, pady=18)
+        self.make_button(
+            buttons, "+ Add Expense", self.add_finance_transaction,
+            primary=True
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "+ Add Money", self.add_income_dialog
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Edit Selected", edit_selected
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Delete Selected", delete_selected
+        ).pack(side="right", padx=(8, 0))
+        self.make_button(
+            buttons, "Undo Last Action", self.undo_finance_action
+        ).pack(side="left")
+
+
+
+# ============================================================
+# START APPLICATION
+# ============================================================
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TaskTrack(root)
+    root.mainloop()
