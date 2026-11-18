@@ -5,10 +5,10 @@
 Built using Python Tkinter, the application combines a simple graphical interface with practical applications of data structures and algorithms.
 
 ### Features
-- **Academic Mode: Manage academic tasks, categories, task types, and deadlines.
-- **Finance Mode: Track monthly allowance, additional money, expenses, and remaining balance.
-- **Local Storage: Save and manage information using JSON files.
-- **Interactive GUI: Navigate between both modes through one desktop application
+- **Academic Mode:** Manage academic tasks, categories, task types, and deadlines.
+- **Finance Mode:** Track monthly allowance, additional money, expenses, and remaining balance.
+- **Local Storage:** Save and manage information using JSON files.
+- **Interactive GUI:** Navigate between both modes through one desktop application
 
 ### Technologies
 - Python
